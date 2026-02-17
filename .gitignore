@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual envs
+.venv/
+venv/
+
+# Secrets
+.env
+
+# Runtime/generated app data
+chat_images/
+history.md
+history-compressed.md
+history_state.json
+memory.md
+user.md
+trusted_devices.json
+
+# Local tooling / certs
+.gradio/
+
+# Local backups / scratch
+backups/
+*copy*.py
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

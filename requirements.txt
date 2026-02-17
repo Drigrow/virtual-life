@@ -1,0 +1,6 @@
+gradio>=5.0.0
+openai>=1.55.0
+python-dotenv>=1.0.1
+Pillow>=10.0.0
+uvicorn>=0.30.0
+fastapi>=0.112.0
