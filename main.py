@@ -500,9 +500,35 @@ def load_state() -> dict:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         state = {"compressed_memories": [], "pending_turns": []}
+    if not isinstance(state, dict):
+        state = {"compressed_memories": [], "pending_turns": []}
 
     state.setdefault("compressed_memories", [])
     state.setdefault("pending_turns", [])
+    if not isinstance(state["compressed_memories"], list):
+        state["compressed_memories"] = []
+    if not isinstance(state["pending_turns"], list):
+        state["pending_turns"] = []
+
+    cleaned_pending = []
+    for turn in state["pending_turns"]:
+        if not isinstance(turn, dict):
+            continue
+        user = str(turn.get("user", "") or "").strip()
+        assistant = str(turn.get("assistant", "") or "").strip()
+        if user or assistant:
+            cleaned_pending.append({"user": user, "assistant": assistant})
+    state["pending_turns"] = cleaned_pending
+
+    cleaned_comp = []
+    for item in state["compressed_memories"]:
+        if not isinstance(item, dict):
+            continue
+        sid = item.get("id")
+        summary = str(item.get("summary", "") or "").strip()
+        if isinstance(sid, int) and summary:
+            cleaned_comp.append({"id": sid, "summary": summary})
+    state["compressed_memories"] = cleaned_comp
     return state
 
 
@@ -684,7 +710,14 @@ def clear_all_history(confirm_text: str):
 def summarize_turns(client: OpenAI, turns: list[dict]) -> str:
     turns_text = []
     for idx, turn in enumerate(turns, start=1):
-        turns_text.append(f"Turn {idx}\nUser: {turn['user']}\nAssistant: {turn['assistant']}")
+        if not isinstance(turn, dict):
+            continue
+        user = str(turn.get("user", "") or "")
+        assistant = str(turn.get("assistant", "") or "")
+        turns_text.append(f"Turn {idx}\nUser: {user}\nAssistant: {assistant}")
+
+    if not turns_text:
+        return "No valid turns to summarize."
 
     prompt = (
         "Compress these chat turns into compact long-term memory.\n"
@@ -698,7 +731,9 @@ def summarize_turns(client: OpenAI, turns: list[dict]) -> str:
         messages=[{"role": "user", "content": prompt}],
         extra_body={"reasoning": {"enabled": False}},
     )
-    return (response.choices[0].message.content or "").strip()
+    msg = response.choices[0].message if response and response.choices else None
+    content = (getattr(msg, "content", "") or "").strip() if msg else ""
+    return content or "Summary unavailable due to empty model response."
 
 
 def rewrite_history_compressed(state: dict) -> None:
@@ -736,10 +771,14 @@ def rewrite_history_compressed(state: dict) -> None:
 def maybe_compress_history(client: OpenAI, state: dict) -> None:
     while len(state["pending_turns"]) >= COMPRESS_EVERY_TURNS:
         batch = state["pending_turns"][:COMPRESS_EVERY_TURNS]
-        summary_text = summarize_turns(client, batch)
-        next_id = len(state["compressed_memories"]) + 1
-        state["compressed_memories"].append({"id": next_id, "summary": summary_text})
-        state["pending_turns"] = state["pending_turns"][COMPRESS_EVERY_TURNS:]
+        try:
+            summary_text = summarize_turns(client, batch)
+            next_id = len(state["compressed_memories"]) + 1
+            state["compressed_memories"].append({"id": next_id, "summary": summary_text})
+            state["pending_turns"] = state["pending_turns"][COMPRESS_EVERY_TURNS:]
+        except Exception:
+            # Do not break chat flow on summarization failures; keep pending turns as-is.
+            break
 
 
 def append_memory_fact(fact: str) -> bool:
@@ -902,13 +941,12 @@ def chat_once(
         answer = "".join(answer_parts).strip() or "(No text response)"
         chat_ui_state[-1]["content"] = answer
 
+        append_turn_history(user_plain_text, answer, saved_image_path)
         state = load_state()
         state["pending_turns"].append({"user": memory_user_text, "assistant": answer})
         maybe_compress_history(client, state)
         save_state(state)
         rewrite_history_compressed(state)
-
-        append_turn_history(user_plain_text, answer, saved_image_path)
         try:
             extract_memory_with_function_call(client, user_plain_text, answer)
         except Exception:
