@@ -846,6 +846,7 @@ def chat_once(
     try:
         ensure_files()
         client = get_client()
+        msg_cleared = False
 
         user_message, memory_user_text, user_plain_text, saved_image_path = build_user_message(
             message, image_path
@@ -858,15 +859,48 @@ def chat_once(
         if use_web_search:
             extra_body["plugins"] = [{"id": "web"}]
             extra_body["web_search_options"] = {"search_context_size": "medium"}
+        chat_ui_state = chat_ui_state or []
+        if saved_image_path:
+            data_url = file_to_data_url(Path(saved_image_path))
+            user_display = f"{user_plain_text}\n\n![uploaded image]({data_url})"
+        else:
+            user_display = user_plain_text
 
-        response = client.chat.completions.create(
+        chat_ui_state.append({"role": "user", "content": user_display})
+        chat_ui_state.append({"role": "assistant", "content": ""})
+        yield (
+            chat_ui_state,
+            chat_ui_state,
+            f"Streaming... thinking={bool(thinking_enabled)} web_search={use_web_search}",
+            "",
+        )
+        msg_cleared = True
+
+        stream = client.chat.completions.create(
             model=MODEL_NAME,
             messages=context_messages,
             extra_body=extra_body,
+            stream=True,
         )
 
-        assistant = response.choices[0].message
-        answer = (assistant.content or "").strip() or "(No text response)"
+        answer_parts: list[str] = []
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            piece = ""
+            if delta is not None:
+                piece = getattr(delta, "content", "") or ""
+            if piece:
+                answer_parts.append(piece)
+                chat_ui_state[-1]["content"] = "".join(answer_parts)
+                yield (
+                    chat_ui_state,
+                    chat_ui_state,
+                    f"Streaming... thinking={bool(thinking_enabled)} web_search={use_web_search}",
+                    gr.update(),
+                )
+
+        answer = "".join(answer_parts).strip() or "(No text response)"
+        chat_ui_state[-1]["content"] = answer
 
         state = load_state()
         state["pending_turns"].append({"user": memory_user_text, "assistant": answer})
@@ -881,21 +915,11 @@ def chat_once(
             # Keep chat flow working even if tool-calling is unavailable.
             pass
 
-        chat_ui_state = chat_ui_state or []
-        if saved_image_path:
-            data_url = file_to_data_url(Path(saved_image_path))
-            user_display = f"{user_plain_text}\n\n![uploaded image]({data_url})"
-        else:
-            user_display = user_plain_text
-
-        chat_ui_state.append({"role": "user", "content": user_display})
-        chat_ui_state.append({"role": "assistant", "content": answer})
-
         status = (
             f"Done. thinking={bool(thinking_enabled)} "
             f"web_search_enabled={bool(web_search_enabled)} web_search_used={use_web_search}"
         )
-        return chat_ui_state, chat_ui_state, "", None, status
+        yield chat_ui_state, chat_ui_state, status, gr.update()
     except Exception as exc:
         if isinstance(exc, AuthenticationError) or "User not found" in str(exc):
             err = (
@@ -906,13 +930,15 @@ def chat_once(
             fallback_user = (message or "").strip() or "(image message)"
             chat_ui_state.append({"role": "user", "content": fallback_user})
             chat_ui_state.append({"role": "assistant", "content": f"Error: {err}"})
-            return chat_ui_state, chat_ui_state, message, image_path, f"Error: {err}"
+            yield chat_ui_state, chat_ui_state, f"Error: {err}", ("" if not msg_cleared else gr.update())
+            return
 
         chat_ui_state = chat_ui_state or []
         fallback_user = (message or "").strip() or "(image message)"
         chat_ui_state.append({"role": "user", "content": fallback_user})
         chat_ui_state.append({"role": "assistant", "content": f"Error: {exc}"})
-        return chat_ui_state, chat_ui_state, message, image_path, f"Error: {exc}"
+        yield chat_ui_state, chat_ui_state, f"Error: {exc}", ("" if not msg_cleared else gr.update())
+        return
 
 
 def build_app() -> gr.Blocks:
@@ -981,12 +1007,12 @@ def build_app() -> gr.Blocks:
         send.click(
             fn=chat_once,
             inputs=[message, image, thinking, web_search, chat_ui_state],
-            outputs=[chatbot, chat_ui_state, message, image, status],
+            outputs=[chatbot, chat_ui_state, status, message],
         )
         message.submit(
             fn=chat_once,
             inputs=[message, image, thinking, web_search, chat_ui_state],
-            outputs=[chatbot, chat_ui_state, message, image, status],
+            outputs=[chatbot, chat_ui_state, status, message],
         )
         clear_btn.click(
             fn=clear_all_history,
