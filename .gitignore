@@ -6,11 +6,12 @@ __pycache__/
 # Virtual envs
 .venv/
 venv/
+env/
 
 # Secrets
 .env
 
-# Runtime/generated app data
+# Runtime / generated app data (personal — never commit)
 chat_images/
 history.md
 history-compressed.md
@@ -19,14 +20,17 @@ memory.md
 user.md
 trusted_devices.json
 
-# Local tooling / certs
+# Local tooling
 .gradio/
+.agent/
+.gemini/
 
 # Local backups / scratch
 backups/
 *copy*.py
+*.bak
 
-# OS/editor
+# OS / editor
 .DS_Store
 Thumbs.db
 .vscode/

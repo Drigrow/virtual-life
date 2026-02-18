@@ -106,6 +106,16 @@ I18N = {
         "user_profile_label": "Editable user profile/context",
         "user_profile_placeholder": "Add user preferences, profile, constraints, goals...",
         "save_profile_btn": "Save User Profile",
+        "memory_accordion": "Memory Management",
+        "manual_compress_btn": "Manual Compress",
+        "advanced_compress_warning": (
+            "⚠️ **Advanced Compress may cause memory loss.** "
+            "It merges existing compressed summaries together — details may be lost in the process. "
+            "Type <code>COMPRESS</code> below to confirm."
+        ),
+        "advanced_compress_confirm_label": "Type COMPRESS to confirm",
+        "advanced_compress_confirm_placeholder": "COMPRESS",
+        "advanced_compress_btn": "Advanced Compress",
         "danger_accordion": "Danger Zone",
         "danger_md": (
             "### WARNING: THIS ACTION IS PERMANENT AND CANNOT BE UNDONE.\n"
@@ -131,6 +141,16 @@ I18N = {
         "user_profile_label": "可编辑用户资料/上下文",
         "user_profile_placeholder": "填写用户偏好、背景、约束、目标……",
         "save_profile_btn": "保存用户资料",
+        "memory_accordion": "记忆管理",
+        "manual_compress_btn": "手动压缩",
+        "advanced_compress_warning": (
+            "⚠️ **高级压缩可能导致记忆丢失。** "
+            "此操作将合并已压缩的摘要，部分细节可能在过程中丢失。"
+            "请在下方输入 <code>COMPRESS</code> 以确认。"
+        ),
+        "advanced_compress_confirm_label": "输入 COMPRESS 以确认",
+        "advanced_compress_confirm_placeholder": "COMPRESS",
+        "advanced_compress_btn": "高级压缩",
         "danger_accordion": "危险区域",
         "danger_md": (
             "### 警告：此操作为永久删除，无法恢复。\n"
@@ -185,8 +205,38 @@ APP_CSS = """
   line-height: 1.35 !important;
 }
 
+/* ── Remove Gradio's orange pending/focus ring on the message input ── */
+#message_input {
+  --focus-color: rgba(100, 116, 139, 0.4) !important;
+  --border-color-focus: rgba(100, 116, 139, 0.5) !important;
+}
+#message_input:focus-within,
+#message_input.pending {
+  border-color: rgba(100, 116, 139, 0.5) !important;
+  box-shadow: 0 0 0 2px rgba(100, 116, 139, 0.15) !important;
+  outline: none !important;
+}
+/* Kill the orange bottom-border progress line that Gradio adds during streaming */
+.generating {
+  border: none !important;
+  animation: none !important;
+}
+
+/* ── Status bar: clean pill style ── */
 #status_md {
   margin-top: 6px !important;
+}
+#status_md p {
+  display: inline-block;
+  margin: 0;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #64748b;
+  background: rgba(100, 116, 139, 0.08);
+  border: 1px solid rgba(100, 116, 139, 0.18);
+  letter-spacing: 0.01em;
 }
 
 #send_btn button,
@@ -659,6 +709,11 @@ def apply_language(lang_code: str):
         gr.update(label=t["user_profile_accordion"]),
         gr.update(label=t["user_profile_label"], placeholder=t["user_profile_placeholder"]),
         gr.update(value=t["save_profile_btn"]),
+        gr.update(label=t["memory_accordion"]),
+        gr.update(value=t["manual_compress_btn"]),
+        gr.update(value=t["advanced_compress_warning"]),
+        gr.update(label=t["advanced_compress_confirm_label"], placeholder=t["advanced_compress_confirm_placeholder"]),
+        gr.update(value=t["advanced_compress_btn"]),
         gr.update(label=t["danger_accordion"]),
         gr.update(value=t["danger_md"]),
         gr.update(label=t["confirm_clear_label"], placeholder=t["confirm_clear_placeholder"]),
@@ -707,7 +762,7 @@ def clear_all_history(confirm_text: str):
     return [], [], "", "History cleared permanently: all conversations, memory, compressed history, and saved images were deleted."
 
 
-def summarize_turns(client: OpenAI, turns: list[dict]) -> str:
+def summarize_turns(client: OpenAI, turns: list[dict], prior_summaries: list[dict] | None = None) -> str:
     turns_text = []
     for idx, turn in enumerate(turns, start=1):
         if not isinstance(turn, dict):
@@ -719,10 +774,24 @@ def summarize_turns(client: OpenAI, turns: list[dict]) -> str:
     if not turns_text:
         return "No valid turns to summarize."
 
+    prior_context = ""
+    if prior_summaries:
+        prior_parts = []
+        for item in prior_summaries:
+            prior_parts.append(f"Summary {item['id']}:\n{item['summary']}")
+        prior_context = (
+            "Here is the existing compressed memory from earlier conversations. "
+            "Build upon this context and avoid repeating information already captured:\n\n"
+            + "\n\n".join(prior_parts)
+            + "\n\n---\n\n"
+        )
+
     prompt = (
         "Compress these chat turns into compact long-term memory.\n"
         "Keep durable user preferences, facts, goals, and open tasks.\n"
         "Do not include chain-of-thought. Use concise bullet points.\n\n"
+        + prior_context
+        + "New turns to compress:\n\n"
         + "\n\n".join(turns_text)
     )
 
@@ -772,13 +841,117 @@ def maybe_compress_history(client: OpenAI, state: dict) -> None:
     while len(state["pending_turns"]) >= COMPRESS_EVERY_TURNS:
         batch = state["pending_turns"][:COMPRESS_EVERY_TURNS]
         try:
-            summary_text = summarize_turns(client, batch)
+            summary_text = summarize_turns(client, batch, prior_summaries=state["compressed_memories"])
             next_id = len(state["compressed_memories"]) + 1
             state["compressed_memories"].append({"id": next_id, "summary": summary_text})
             state["pending_turns"] = state["pending_turns"][COMPRESS_EVERY_TURNS:]
         except Exception:
             # Do not break chat flow on summarization failures; keep pending turns as-is.
             break
+
+
+def manual_compress() -> str:
+    """Compress current pending turns regardless of count."""
+    try:
+        ensure_files()
+        state = load_state()
+        pending = state["pending_turns"]
+        if not pending:
+            return "Nothing to compress — no pending turns."
+
+        client = get_client()
+        summary_text = summarize_turns(client, pending, prior_summaries=state["compressed_memories"])
+        next_id = len(state["compressed_memories"]) + 1
+        state["compressed_memories"].append({"id": next_id, "summary": summary_text})
+        state["pending_turns"] = []
+        save_state(state)
+        rewrite_history_compressed(state)
+        return f"Compressed {len(pending)} pending turn(s) into Summary #{next_id}."
+    except Exception as exc:
+        return f"Compression failed: {exc}"
+
+
+def advanced_compress(confirm_text: str = "") -> str:
+    """Re-chunk and re-summarize compressed memories to reduce file size.
+
+    Skips the 1st compressed summary (initial memory) to keep it clear.
+    Groups remaining summaries into chunks of 5 and re-summarizes each chunk.
+    """
+    if (confirm_text or "").strip() != "COMPRESS":
+        return "Blocked. Type exactly `COMPRESS` in the confirmation box to proceed."
+    try:
+        ensure_files()
+        state = load_state()
+        memories = state["compressed_memories"]
+
+        if len(memories) <= 1:
+            return "Not enough compressed summaries for advanced compression (need > 1)."
+
+        first_summary = memories[0]  # Keep the 1st summary intact
+        rest = memories[1:]  # Summaries to re-chunk
+
+        if len(rest) < 2:
+            return "Not enough summaries beyond the initial one to compress further."
+
+        client = get_client()
+        chunk_size = 5
+        new_summaries = [first_summary]  # Preserve the 1st
+        next_id = 2  # Re-number starting from 2
+
+        for i in range(0, len(rest), chunk_size):
+            chunk = rest[i : i + chunk_size]
+            if len(chunk) == 1:
+                # Single summary, keep as-is but re-number
+                new_summaries.append({"id": next_id, "summary": chunk[0]["summary"]})
+                next_id += 1
+                continue
+
+            # Build pseudo-turns from the summaries in this chunk for re-summarization
+            pseudo_turns = []
+            for item in chunk:
+                pseudo_turns.append({
+                    "user": f"[Compressed Summary #{item['id']}]",
+                    "assistant": item["summary"],
+                })
+
+            re_summary = summarize_compressed_chunk(client, chunk)
+            new_summaries.append({"id": next_id, "summary": re_summary})
+            next_id += 1
+
+        original_count = len(memories)
+        state["compressed_memories"] = new_summaries
+        save_state(state)
+        rewrite_history_compressed(state)
+        return (
+            f"Advanced compression done: {original_count} summaries → {len(new_summaries)} summaries. "
+            f"(1st summary preserved, rest grouped by {chunk_size} and re-summarized.)"
+        )
+    except Exception as exc:
+        return f"Advanced compression failed: {exc}"
+
+
+def summarize_compressed_chunk(client: OpenAI, chunk: list[dict]) -> str:
+    """Re-summarize a chunk of already-compressed summaries into one."""
+    parts = []
+    for item in chunk:
+        parts.append(f"Summary #{item['id']}:\n{item['summary']}")
+
+    prompt = (
+        "You are given multiple compressed memory summaries from earlier conversations. "
+        "Merge and further compress them into a single concise summary.\n"
+        "Keep durable user preferences, facts, goals, and open tasks.\n"
+        "Remove redundancies. Use concise bullet points.\n\n"
+        + "\n\n".join(parts)
+    )
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        extra_body={"reasoning": {"enabled": False}},
+    )
+    msg = response.choices[0].message if response and response.choices else None
+    content = (getattr(msg, "content", "") or "").strip() if msg else ""
+    return content or "Summary unavailable due to empty model response."
 
 
 def append_memory_fact(fact: str) -> bool:
@@ -1033,6 +1206,28 @@ def build_app() -> gr.Blocks:
                     )
                     save_user_btn = gr.Button(I18N["eng"]["save_profile_btn"], elem_id="save_user_btn")
 
+                with gr.Accordion(I18N["eng"]["memory_accordion"], open=False) as memory_accordion:
+                    manual_compress_btn = gr.Button(
+                        I18N["eng"]["manual_compress_btn"],
+                        variant="secondary",
+                        elem_id="manual_compress_btn",
+                    )
+                    advanced_compress_warning_md = gr.Markdown(
+                        I18N["eng"]["advanced_compress_warning"],
+                        elem_id="advanced_compress_warning_md",
+                    )
+                    advanced_compress_confirm = gr.Textbox(
+                        label=I18N["eng"]["advanced_compress_confirm_label"],
+                        lines=1,
+                        placeholder=I18N["eng"]["advanced_compress_confirm_placeholder"],
+                        elem_id="advanced_compress_confirm",
+                    )
+                    advanced_compress_btn = gr.Button(
+                        I18N["eng"]["advanced_compress_btn"],
+                        variant="stop",
+                        elem_id="advanced_compress_btn",
+                    )
+
                 with gr.Accordion(I18N["eng"]["danger_accordion"], open=False) as danger_accordion:
                     danger_md = gr.Markdown(I18N["eng"]["danger_md"])
                     confirm_clear = gr.Textbox(
@@ -1042,15 +1237,36 @@ def build_app() -> gr.Blocks:
                     )
                     clear_btn = gr.Button(I18N["eng"]["clear_btn"], variant="stop", elem_id="clear_btn")
 
+        _disable_inputs = lambda: (gr.update(interactive=False), gr.update(interactive=False))
+        _enable_inputs = lambda: (gr.update(interactive=True), gr.update(interactive=True))
+
         send.click(
+            fn=_disable_inputs,
+            inputs=None,
+            outputs=[message, send],
+            queue=False,
+        ).then(
             fn=chat_once,
             inputs=[message, image, thinking, web_search, chat_ui_state],
             outputs=[chatbot, chat_ui_state, status, message],
+        ).then(
+            fn=_enable_inputs,
+            inputs=None,
+            outputs=[message, send],
         )
         message.submit(
+            fn=_disable_inputs,
+            inputs=None,
+            outputs=[message, send],
+            queue=False,
+        ).then(
             fn=chat_once,
             inputs=[message, image, thinking, web_search, chat_ui_state],
             outputs=[chatbot, chat_ui_state, status, message],
+        ).then(
+            fn=_enable_inputs,
+            inputs=None,
+            outputs=[message, send],
         )
         clear_btn.click(
             fn=clear_all_history,
@@ -1060,6 +1276,16 @@ def build_app() -> gr.Blocks:
         save_user_btn.click(
             fn=save_user_md,
             inputs=[user_profile],
+            outputs=[status],
+        )
+        manual_compress_btn.click(
+            fn=manual_compress,
+            inputs=None,
+            outputs=[status],
+        )
+        advanced_compress_btn.click(
+            fn=advanced_compress,
+            inputs=[advanced_compress_confirm],
             outputs=[status],
         )
         demo.load(
@@ -1080,6 +1306,11 @@ def build_app() -> gr.Blocks:
                 user_profile_accordion,
                 user_profile,
                 save_user_btn,
+                memory_accordion,
+                manual_compress_btn,
+                advanced_compress_warning_md,
+                advanced_compress_confirm,
+                advanced_compress_btn,
                 danger_accordion,
                 danger_md,
                 confirm_clear,
