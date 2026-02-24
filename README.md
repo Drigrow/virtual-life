@@ -54,24 +54,44 @@ history_state.json      ← Internal bookkeeping for compression state
 
 ## Setup
 
+### Quick (recommended)
+
+Run the interactive setup script — it handles everything:
+
 ```bash
-# 1. (Optional) Create a virtual environment
-python -m venv .venv
+python setup.py        # Linux / macOS / Windows
+```
+
+It will:
+- Detect your OS and install `python3-venv` on Debian/Ubuntu if missing
+- Create a virtual environment (default: `.venv`, name is configurable)
+- Install all dependencies from `requirements.txt`
+- Interactively configure your `.env` (API key, login credentials, optional settings)
+- Set up an initial `user.md` persona
+
+Then start the app:
+
+```bash
+# Activate venv first
+source .venv/bin/activate   # Linux / macOS
 .venv\Scripts\activate      # Windows
-# source .venv/bin/activate  # macOS/Linux
 
-# 2. Install dependencies
-pip install -r requirements.txt
-
-# 3. Configure environment
-cp .env.example .env
-# Edit .env and fill in your values
-
-# 4. Run
 python main.py
 ```
 
-Then open **http://127.0.0.1:7860** in your browser.
+Open **http://127.0.0.1:7860** in your browser.
+
+---
+
+### Manual
+
+```bash
+python -m venv .venv
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+cp .env.example .env        # then edit .env with your values
+python main.py
+```
 
 ---
 

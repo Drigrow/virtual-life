@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Virtual Life</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- We'll use marked.js for client-side markdown rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+</head>
+
+<body>
+  <div class="container">
+    <div id="title_md" class="title"># Virtual Life Chat<br><small>Model: google/gemini-3-flash-preview</small></div>
+
+    <div class="desktop_shell">
+      <!-- Left Panel -->
+      <div class="left_panel">
+        <div id="chatbox" class="chatbox">
+          <!-- Chat messages go here -->
+        </div>
+
+        <div class="input_row">
+          <textarea id="message_input" rows="1"
+            placeholder="Type your message and press Enter (Shift+Enter for newline)"></textarea>
+          <button id="send_btn" class="primary-btn">Send</button>
+        </div>
+        <div class="quick_actions" style="display:flex; gap:10px; margin-top:8px;">
+          <button id="edit_last_btn" class="secondary-btn"
+            style="flex:1; font-size:13px; padding:6px; background:#f1f5f9;" disabled>📝 Edit Last</button>
+          <button id="regenerate_btn" class="secondary-btn"
+            style="flex:1; font-size:13px; padding:6px; background:#f1f5f9;" disabled>🔄 Regenerate</button>
+        </div>
+        <div id="status_md" class="status">
+          <p>Ready.</p>
+        </div>
+      </div>
+
+      <!-- Right Panel -->
+      <div class="right_panel">
+        <div class="image_upload">
+          <label>Upload Image (optional)</label>
+          <input type="file" id="image_input" accept="image/*" />
+          <div id="image_preview"></div>
+          <button id="clear_image_btn"
+            style="display:none; width:100%; margin-top:5px; border-radius:4px; padding:4px;">Remove Image</button>
+        </div>
+
+        <div class="controls_row">
+          <label><input type="checkbox" id="thinking_cb" /> Reasoning / Thinking</label>
+          <label><input type="checkbox" id="web_search_cb" checked /> Web Search</label>
+        </div>
+
+        <div class="accordion">
+          <button class="accordion-header">User Profile & Context</button>
+          <div class="accordion-content">
+            <textarea id="user_profile" rows="8"></textarea>
+            <button id="save_user_btn" class="secondary-btn">Save Profile</button>
+          </div>
+        </div>
+
+        <div class="accordion">
+          <button class="accordion-header">Memory Management</button>
+          <div class="accordion-content">
+            <button id="manual_compress_btn" class="secondary-btn">Manual Compress</button>
+            <p class="warning-text" style="font-size:12px; margin-top:10px;">Warning: Advanced compression irreversibly
+              restructures memory.</p>
+            <input type="text" id="advanced_compress_confirm" placeholder="Type COMPRESS" />
+            <button id="advanced_compress_btn" class="danger-btn">Advanced Compress</button>
+          </div>
+        </div>
+
+        <div class="accordion">
+          <button class="accordion-header">Danger Zone</button>
+          <div class="accordion-content">
+            <p class="warning-text" style="font-size:12px; margin-top:0;"><strong>WARNING:</strong> This action
+              permanently deletes ALL history, memory, and uploaded images.</p>
+            <input type="text" id="confirm_clear" placeholder="Type CLEAR ALL HISTORY" />
+            <button id="clear_btn" class="danger-btn">Clear All History</button>
+          </div>
+        </div>
+
+        <div style="margin-top:10px;text-align:center;">
+          <a href="/logout" style="color:#64748b;font-size:12px;text-decoration:none;">Logout</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/main.js"></script>
+</body>
+
+</html>

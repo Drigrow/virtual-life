@@ -12,11 +12,14 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-import gradio as gr
+import asyncio
+import collections
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 import uvicorn
 from dotenv import dotenv_values, load_dotenv
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from openai import AuthenticationError, OpenAI
 from PIL import Image
 
@@ -93,206 +96,8 @@ WEB_SEARCH_TRIGGER_TERMS = [
     "update",
 ]
 
-I18N = {
-    "eng": {
-        "title": f"# Virtual Life Chat\nModel: `{MODEL_NAME}`",
-        "message_label": "Message",
-        "message_placeholder": "Type your message and press Enter to send.",
-        "image_label": "Image",
-        "thinking_label": "Enable thinking",
-        "web_search_label": "Enable web search (when needed)",
-        "send_btn": "Send",
-        "user_profile_accordion": "User Profile (`user.md`)",
-        "user_profile_label": "Editable user profile/context",
-        "user_profile_placeholder": "Add user preferences, profile, constraints, goals...",
-        "save_profile_btn": "Save User Profile",
-        "memory_accordion": "Memory Management",
-        "manual_compress_btn": "Manual Compress",
-        "advanced_compress_warning": (
-            "⚠️ **Advanced Compress may cause memory loss.** "
-            "It merges existing compressed summaries together — details may be lost in the process. "
-            "Type <code>COMPRESS</code> below to confirm."
-        ),
-        "advanced_compress_confirm_label": "Type COMPRESS to confirm",
-        "advanced_compress_confirm_placeholder": "COMPRESS",
-        "advanced_compress_btn": "Advanced Compress",
-        "danger_accordion": "Danger Zone",
-        "danger_md": (
-            "### WARNING: THIS ACTION IS PERMANENT AND CANNOT BE UNDONE.\n"
-            "- Deletes **all** chat turns in `history.md`\n"
-            "- Deletes compressed context in `history-compressed.md`\n"
-            "- Deletes saved profile facts in `memory.md`\n"
-            "- Deletes all local images in `chat_images/`\n"
-            "- This is an irreversible wipe"
-        ),
-        "confirm_clear_label": "Type EXACTLY: CLEAR ALL HISTORY",
-        "confirm_clear_placeholder": "CLEAR ALL HISTORY",
-        "clear_btn": "Clear All History (Irreversible)",
-    },
-    "chinese_sim": {
-        "title": f"# Virtual Life 聊天\n模型: `{MODEL_NAME}`",
-        "message_label": "消息",
-        "message_placeholder": "输入消息后按 Enter 发送。",
-        "image_label": "图片",
-        "thinking_label": "开启思考",
-        "web_search_label": "开启联网搜索（按需）",
-        "send_btn": "发送",
-        "user_profile_accordion": "用户资料（`user.md`）",
-        "user_profile_label": "可编辑用户资料/上下文",
-        "user_profile_placeholder": "填写用户偏好、背景、约束、目标……",
-        "save_profile_btn": "保存用户资料",
-        "memory_accordion": "记忆管理",
-        "manual_compress_btn": "手动压缩",
-        "advanced_compress_warning": (
-            "⚠️ **高级压缩可能导致记忆丢失。** "
-            "此操作将合并已压缩的摘要，部分细节可能在过程中丢失。"
-            "请在下方输入 <code>COMPRESS</code> 以确认。"
-        ),
-        "advanced_compress_confirm_label": "输入 COMPRESS 以确认",
-        "advanced_compress_confirm_placeholder": "COMPRESS",
-        "advanced_compress_btn": "高级压缩",
-        "danger_accordion": "危险区域",
-        "danger_md": (
-            "### 警告：此操作为永久删除，无法恢复。\n"
-            "- 删除 `history.md` 中**全部**聊天记录\n"
-            "- 删除 `history-compressed.md` 中压缩上下文\n"
-            "- 删除 `memory.md` 中保存的用户记忆\n"
-            "- 删除 `chat_images/` 中所有本地图片\n"
-            "- 此为不可逆清空"
-        ),
-        "confirm_clear_label": "请精确输入：CLEAR ALL HISTORY",
-        "confirm_clear_placeholder": "CLEAR ALL HISTORY",
-        "clear_btn": "清空全部历史（不可恢复）",
-    },
-}
+# I18N and CSS moved to frontend.
 
-APP_CSS = """
-:root {
-  --app-max: 1380px;
-  --radius: 14px;
-}
-
-.gradio-container {
-  max-width: var(--app-max) !important;
-  margin: 0 auto !important;
-  padding: 10px 12px 20px 12px !important;
-}
-
-#title_md {
-  margin-bottom: 6px !important;
-}
-
-#desktop_shell {
-  gap: 14px !important;
-}
-
-#left_panel,
-#right_panel {
-  border: 1px solid rgba(120, 120, 120, 0.18) !important;
-  border-radius: var(--radius) !important;
-  padding: 10px !important;
-  background: rgba(245, 245, 245, 0.35) !important;
-}
-
-#chatbox {
-  min-height: 64vh !important;
-  max-height: 72vh !important;
-  border-radius: var(--radius) !important;
-}
-
-#message_input textarea {
-  font-size: 16px !important;
-  line-height: 1.35 !important;
-}
-
-/* ── Remove Gradio's orange pending/focus ring on the message input ── */
-#message_input {
-  --focus-color: rgba(100, 116, 139, 0.4) !important;
-  --border-color-focus: rgba(100, 116, 139, 0.5) !important;
-}
-#message_input:focus-within,
-#message_input.pending {
-  border-color: rgba(100, 116, 139, 0.5) !important;
-  box-shadow: 0 0 0 2px rgba(100, 116, 139, 0.15) !important;
-  outline: none !important;
-}
-/* Kill the orange bottom-border progress line that Gradio adds during streaming */
-.generating {
-  border: none !important;
-  animation: none !important;
-}
-
-/* ── Status bar: clean pill style ── */
-#status_md {
-  margin-top: 6px !important;
-}
-#status_md p {
-  display: inline-block;
-  margin: 0;
-  padding: 4px 12px;
-  border-radius: 20px;
-  font-size: 12px;
-  font-weight: 500;
-  color: #64748b;
-  background: rgba(100, 116, 139, 0.08);
-  border: 1px solid rgba(100, 116, 139, 0.18);
-  letter-spacing: 0.01em;
-}
-
-#send_btn button,
-#save_user_btn button,
-#clear_btn button {
-  min-height: 42px !important;
-  border-radius: 10px !important;
-}
-
-#controls_row,
-#input_row {
-  gap: 10px !important;
-}
-
-#right_panel .gradio-accordion {
-  margin-top: 8px !important;
-}
-
-#image_input {
-  min-height: 220px !important;
-}
-
-@media (max-width: 900px) {
-  .gradio-container {
-    padding: 8px 8px 14px 8px !important;
-  }
-
-  #left_panel,
-  #right_panel {
-    padding: 8px !important;
-  }
-
-  #chatbox {
-    min-height: 46vh !important;
-    max-height: 58vh !important;
-  }
-}
-
-@media (max-width: 640px) {
-  #chatbox {
-    min-height: 42vh !important;
-    max-height: 54vh !important;
-  }
-
-  #send_btn button {
-    width: 100% !important;
-  }
-}
-
-@media (orientation: landscape) and (max-height: 540px) {
-  #chatbox {
-    min-height: 36vh !important;
-    max-height: 46vh !important;
-  }
-}
-"""
 
 
 def resolve_openrouter_api_key() -> str:
@@ -485,38 +290,7 @@ def should_use_web_search(user_text: str) -> bool:
         return False
     return any(term in text for term in WEB_SEARCH_TRIGGER_TERMS)
 
-
-def normalize_lang(lang: str | None) -> str:
-    return "chinese_sim" if (lang or "").strip().lower() == "chinese_sim" else "eng"
-
-
-def detect_lang_from_request(request: gr.Request | None) -> str:
-    if request is None:
-        return "eng"
-
-    try:
-        # Prefer Gradio/query locale first.
-        qp = dict(getattr(request, "query_params", {}) or {})
-        for key in ("__lang", "lang", "language", "locale"):
-            raw = str(qp.get(key, "")).strip().lower()
-            if raw in ("chinese_sim", "zh-cn", "zh_hans", "zh-hans", "zh"):
-                return "chinese_sim"
-            if raw:
-                return "eng"
-    except Exception:
-        pass
-
-    try:
-        # Fallback: only inspect PRIMARY browser language.
-        headers = dict(getattr(request, "headers", {}) or {})
-        accept_lang = str(headers.get("accept-language", "")).strip().lower()
-        primary = accept_lang.split(",")[0].split(";")[0].strip()
-        if primary.startswith("zh"):
-            return "chinese_sim"
-    except Exception:
-        pass
-
-    return "eng"
+# Language detection removed as I18N was removed in favor of HTML bindings.
 
 
 def ensure_files() -> None:
@@ -691,39 +465,9 @@ def load_chat_history_for_ui() -> list[dict]:
     return turns
 
 
-def init_chat_ui() -> tuple[list[dict], list[dict], str]:
+def init_chat_ui() -> dict:
     initial = load_chat_history_for_ui()
-    return initial, initial, f"Loaded {len(initial) // 2} turns from history.md"
-
-
-def apply_language(lang_code: str):
-    lang = normalize_lang(lang_code)
-    t = I18N[lang]
-    return (
-        gr.update(value=t["title"]),
-        gr.update(label=t["message_label"], placeholder=t["message_placeholder"]),
-        gr.update(label=t["image_label"]),
-        gr.update(label=t["thinking_label"]),
-        gr.update(label=t["web_search_label"]),
-        gr.update(value=t["send_btn"]),
-        gr.update(label=t["user_profile_accordion"]),
-        gr.update(label=t["user_profile_label"], placeholder=t["user_profile_placeholder"]),
-        gr.update(value=t["save_profile_btn"]),
-        gr.update(label=t["memory_accordion"]),
-        gr.update(value=t["manual_compress_btn"]),
-        gr.update(value=t["advanced_compress_warning"]),
-        gr.update(label=t["advanced_compress_confirm_label"], placeholder=t["advanced_compress_confirm_placeholder"]),
-        gr.update(value=t["advanced_compress_btn"]),
-        gr.update(label=t["danger_accordion"]),
-        gr.update(value=t["danger_md"]),
-        gr.update(label=t["confirm_clear_label"], placeholder=t["confirm_clear_placeholder"]),
-        gr.update(value=t["clear_btn"]),
-    )
-
-
-def init_language(request: gr.Request):
-    detected = detect_lang_from_request(request)
-    return apply_language(detected)
+    return {"chat_ui_state": initial, "status": f"Loaded {len(initial) // 2} turns from history.md"}
 
 
 def load_user_md() -> str:
@@ -731,21 +475,16 @@ def load_user_md() -> str:
     return USER_MD_PATH.read_text(encoding="utf-8")
 
 
-def save_user_md(content: str):
+def save_user_md(content: str) -> dict:
     ensure_files()
     USER_MD_PATH.write_text((content or "").strip() + "\n", encoding="utf-8")
-    return f"Saved user profile to `{USER_MD_PATH.as_posix()}`."
+    return {"status": f"Saved user profile to `{USER_MD_PATH.as_posix()}`."}
 
 
-def clear_all_history(confirm_text: str):
+def clear_all_history(confirm_text: str) -> dict:
     required = "CLEAR ALL HISTORY"
     if (confirm_text or "").strip() != required:
-        return (
-            gr.update(),
-            gr.update(),
-            gr.update(),
-            f"Blocked. Type exactly `{required}` to confirm irreversible deletion.",
-        )
+        return {"cleared": False, "status": f"Blocked. Type exactly `{required}` to confirm irreversible deletion."}
 
     empty_state = {"compressed_memories": [], "pending_turns": []}
     save_state(empty_state)
@@ -759,7 +498,7 @@ def clear_all_history(confirm_text: str):
             if p.is_file():
                 p.unlink()
 
-    return [], [], "", "History cleared permanently: all conversations, memory, compressed history, and saved images were deleted."
+    return {"cleared": True, "status": "History cleared permanently: all conversations, memory, compressed history, and saved images were deleted."}
 
 
 def summarize_turns(client: OpenAI, turns: list[dict], prior_summaries: list[dict] | None = None) -> str:
@@ -850,14 +589,14 @@ def maybe_compress_history(client: OpenAI, state: dict) -> None:
             break
 
 
-def manual_compress() -> str:
+def manual_compress() -> dict:
     """Compress current pending turns regardless of count."""
     try:
         ensure_files()
         state = load_state()
         pending = state["pending_turns"]
         if not pending:
-            return "Nothing to compress — no pending turns."
+            return {"status": "Nothing to compress — no pending turns."}
 
         client = get_client()
         summary_text = summarize_turns(client, pending, prior_summaries=state["compressed_memories"])
@@ -866,32 +605,28 @@ def manual_compress() -> str:
         state["pending_turns"] = []
         save_state(state)
         rewrite_history_compressed(state)
-        return f"Compressed {len(pending)} pending turn(s) into Summary #{next_id}."
+        return {"status": f"Compressed {len(pending)} pending turn(s) into Summary #{next_id}."}
     except Exception as exc:
-        return f"Compression failed: {exc}"
+        return {"status": f"Compression failed: {exc}"}
 
 
-def advanced_compress(confirm_text: str = "") -> str:
-    """Re-chunk and re-summarize compressed memories to reduce file size.
-
-    Skips the 1st compressed summary (initial memory) to keep it clear.
-    Groups remaining summaries into chunks of 5 and re-summarizes each chunk.
-    """
+def advanced_compress(confirm_text: str = "") -> dict:
+    """Re-chunk and re-summarize compressed memories to reduce file size."""
     if (confirm_text or "").strip() != "COMPRESS":
-        return "Blocked. Type exactly `COMPRESS` in the confirmation box to proceed."
+        return {"status": "Blocked. Type exactly `COMPRESS` in the confirmation box to proceed."}
     try:
         ensure_files()
         state = load_state()
         memories = state["compressed_memories"]
 
         if len(memories) <= 1:
-            return "Not enough compressed summaries for advanced compression (need > 1)."
+            return {"status": "Not enough compressed summaries for advanced compression (need > 1)."}
 
         first_summary = memories[0]  # Keep the 1st summary intact
         rest = memories[1:]  # Summaries to re-chunk
 
         if len(rest) < 2:
-            return "Not enough summaries beyond the initial one to compress further."
+            return {"status": "Not enough summaries beyond the initial one to compress further."}
 
         client = get_client()
         chunk_size = 5
@@ -906,14 +641,6 @@ def advanced_compress(confirm_text: str = "") -> str:
                 next_id += 1
                 continue
 
-            # Build pseudo-turns from the summaries in this chunk for re-summarization
-            pseudo_turns = []
-            for item in chunk:
-                pseudo_turns.append({
-                    "user": f"[Compressed Summary #{item['id']}]",
-                    "assistant": item["summary"],
-                })
-
             re_summary = summarize_compressed_chunk(client, chunk)
             new_summaries.append({"id": next_id, "summary": re_summary})
             next_id += 1
@@ -922,12 +649,13 @@ def advanced_compress(confirm_text: str = "") -> str:
         state["compressed_memories"] = new_summaries
         save_state(state)
         rewrite_history_compressed(state)
-        return (
+        return {"status": 
             f"Advanced compression done: {original_count} summaries → {len(new_summaries)} summaries. "
             f"(1st summary preserved, rest grouped by {chunk_size} and re-summarized.)"
-        )
+        }
     except Exception as exc:
-        return f"Advanced compression failed: {exc}"
+        return {"status": f"Advanced compression failed: {exc}"}
+
 
 
 def summarize_compressed_chunk(client: OpenAI, chunk: list[dict]) -> str:
@@ -1048,45 +776,60 @@ def build_context_messages(user_message: dict) -> list[dict]:
     return messages
 
 
-def chat_once(
-    message: str,
-    image_path: str | None,
-    thinking_enabled: bool,
-    web_search_enabled: bool,
-    chat_ui_state: list[dict],
-):
+# --- FastAPI Models and Routes ---
+
+class ChatRequest(BaseModel):
+    message: str
+    image_data: str | None = None
+    thinking: bool = False
+    web_search: bool = True
+
+class SaveProfileRequest(BaseModel):
+    content: str
+
+class CompressRequest(BaseModel):
+    confirm_text: str = ""
+
+class PopTurnResponse(BaseModel):
+    success: bool
+    user_text: str = ""
+    image_data: str | None = None
+    error: str = ""
+
+async def sse_chat_generator(chat_req: ChatRequest):
     try:
         ensure_files()
         client = get_client()
-        msg_cleared = False
+
+        # Handle base64 image data
+        saved_image_path = None
+        if chat_req.image_data and chat_req.image_data.startswith("data:image"):
+            import tempfile
+            from pathlib import Path
+            import uuid
+            
+            header, encoded = chat_req.image_data.split(",", 1)
+            ext = header.split(";")[0].split("/")[1]
+            if ext == "jpeg": ext = "jpg"
+            
+            temp_path = Path(tempfile.gettempdir()) / f"{uuid.uuid4()}.{ext}"
+            temp_path.write_bytes(base64.b64decode(encoded))
+            saved_image_path = str(persist_and_compress_image(str(temp_path)))
+            temp_path.unlink(missing_ok=True)
 
         user_message, memory_user_text, user_plain_text, saved_image_path = build_user_message(
-            message, image_path
+            chat_req.message, saved_image_path
         )
 
         context_messages = build_context_messages(user_message)
-        use_web_search = bool(web_search_enabled) and should_use_web_search(user_plain_text)
+        use_web_search = bool(chat_req.web_search) and should_use_web_search(user_plain_text)
 
-        extra_body = {"reasoning": {"enabled": bool(thinking_enabled)}}
+        extra_body = {"reasoning": {"enabled": bool(chat_req.thinking)}}
         if use_web_search:
             extra_body["plugins"] = [{"id": "web"}]
             extra_body["web_search_options"] = {"search_context_size": "medium"}
-        chat_ui_state = chat_ui_state or []
-        if saved_image_path:
-            data_url = file_to_data_url(Path(saved_image_path))
-            user_display = f"{user_plain_text}\n\n![uploaded image]({data_url})"
-        else:
-            user_display = user_plain_text
 
-        chat_ui_state.append({"role": "user", "content": user_display})
-        chat_ui_state.append({"role": "assistant", "content": ""})
-        yield (
-            chat_ui_state,
-            chat_ui_state,
-            f"Streaming... thinking={bool(thinking_enabled)} web_search={use_web_search}",
-            "",
-        )
-        msg_cleared = True
+        yield f"data: {json.dumps({'status': f'Thinking... (Web Search: {use_web_search})'})}\n\n"
 
         stream = client.chat.completions.create(
             model=MODEL_NAME,
@@ -1096,6 +839,9 @@ def chat_once(
         )
 
         answer_parts: list[str] = []
+        last_yield_time = 0.0
+        update_throttle = 0.06
+
         for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
             piece = ""
@@ -1103,17 +849,16 @@ def chat_once(
                 piece = getattr(delta, "content", "") or ""
             if piece:
                 answer_parts.append(piece)
-                chat_ui_state[-1]["content"] = "".join(answer_parts)
-                yield (
-                    chat_ui_state,
-                    chat_ui_state,
-                    f"Streaming... thinking={bool(thinking_enabled)} web_search={use_web_search}",
-                    gr.update(),
-                )
+                current_time = time.time()
+                if current_time - last_yield_time > update_throttle:
+                    yield f"data: {json.dumps({'content': ''.join(answer_parts)})}\n\n"
+                    last_yield_time = current_time
+                    await asyncio.sleep(0)  # yield control to event loop
 
         answer = "".join(answer_parts).strip() or "(No text response)"
-        chat_ui_state[-1]["content"] = answer
+        yield f"data: {json.dumps({'content': answer})}\n\n"
 
+        # Background processing
         append_turn_history(user_plain_text, answer, saved_image_path)
         state = load_state()
         state["pending_turns"].append({"user": memory_user_text, "assistant": answer})
@@ -1123,214 +868,48 @@ def chat_once(
         try:
             extract_memory_with_function_call(client, user_plain_text, answer)
         except Exception:
-            # Keep chat flow working even if tool-calling is unavailable.
             pass
 
-        status = (
-            f"Done. thinking={bool(thinking_enabled)} "
-            f"web_search_enabled={bool(web_search_enabled)} web_search_used={use_web_search}"
-        )
-        yield chat_ui_state, chat_ui_state, status, gr.update()
+        yield f"data: {json.dumps({'status': 'Ready.'})}\n\n"
+        yield "data: [DONE]\n\n"
+
     except Exception as exc:
         if isinstance(exc, AuthenticationError) or "User not found" in str(exc):
-            err = (
-                "OpenRouter authentication failed (401: User not found). "
-                "Set a valid OPENROUTER_API_KEY in .env or your shell and restart the app."
-            )
-            chat_ui_state = chat_ui_state or []
-            fallback_user = (message or "").strip() or "(image message)"
-            chat_ui_state.append({"role": "user", "content": fallback_user})
-            chat_ui_state.append({"role": "assistant", "content": f"Error: {err}"})
-            yield chat_ui_state, chat_ui_state, f"Error: {err}", ("" if not msg_cleared else gr.update())
-            return
-
-        chat_ui_state = chat_ui_state or []
-        fallback_user = (message or "").strip() or "(image message)"
-        chat_ui_state.append({"role": "user", "content": fallback_user})
-        chat_ui_state.append({"role": "assistant", "content": f"Error: {exc}"})
-        yield chat_ui_state, chat_ui_state, f"Error: {exc}", ("" if not msg_cleared else gr.update())
-        return
-
-
-def build_app() -> gr.Blocks:
-    ensure_files()
-    state = load_state()
-    rewrite_history_compressed(state)
-    with gr.Blocks(title="Virtual Life Chat (Gradio)", css=APP_CSS) as demo:
-        title_md = gr.Markdown(I18N["eng"]["title"], elem_id="title_md")
-
-        chat_ui_state = gr.State([])
-
-        with gr.Row(elem_id="desktop_shell", equal_height=False):
-            with gr.Column(scale=8, min_width=680, elem_id="left_panel"):
-                chatbot = gr.Chatbot(height=520, elem_id="chatbox")
-                with gr.Row(elem_id="input_row"):
-                    message = gr.Textbox(
-                        label=I18N["eng"]["message_label"],
-                        lines=1,
-                        placeholder=I18N["eng"]["message_placeholder"],
-                        autofocus=True,
-                        scale=8,
-                        min_width=340,
-                        elem_id="message_input",
-                    )
-                    send = gr.Button(
-                        I18N["eng"]["send_btn"],
-                        variant="primary",
-                        scale=2,
-                        min_width=120,
-                        elem_id="send_btn",
-                    )
-                status = gr.Markdown("", elem_id="status_md")
-
-            with gr.Column(scale=4, min_width=300, elem_id="right_panel"):
-                image = gr.Image(
-                    label=I18N["eng"]["image_label"],
-                    type="filepath",
-                    elem_id="image_input",
-                )
-                with gr.Row(elem_id="controls_row"):
-                    thinking = gr.Checkbox(
-                        label=I18N["eng"]["thinking_label"], value=False, scale=1, min_width=110
-                    )
-                    web_search = gr.Checkbox(
-                        label=I18N["eng"]["web_search_label"], value=True, scale=1, min_width=160
-                    )
-
-                with gr.Accordion(I18N["eng"]["user_profile_accordion"], open=False) as user_profile_accordion:
-                    user_profile = gr.Textbox(
-                        label=I18N["eng"]["user_profile_label"],
-                        lines=8,
-                        value=load_user_md(),
-                        placeholder=I18N["eng"]["user_profile_placeholder"],
-                    )
-                    save_user_btn = gr.Button(I18N["eng"]["save_profile_btn"], elem_id="save_user_btn")
-
-                with gr.Accordion(I18N["eng"]["memory_accordion"], open=False) as memory_accordion:
-                    manual_compress_btn = gr.Button(
-                        I18N["eng"]["manual_compress_btn"],
-                        variant="secondary",
-                        elem_id="manual_compress_btn",
-                    )
-                    advanced_compress_warning_md = gr.Markdown(
-                        I18N["eng"]["advanced_compress_warning"],
-                        elem_id="advanced_compress_warning_md",
-                    )
-                    advanced_compress_confirm = gr.Textbox(
-                        label=I18N["eng"]["advanced_compress_confirm_label"],
-                        lines=1,
-                        placeholder=I18N["eng"]["advanced_compress_confirm_placeholder"],
-                        elem_id="advanced_compress_confirm",
-                    )
-                    advanced_compress_btn = gr.Button(
-                        I18N["eng"]["advanced_compress_btn"],
-                        variant="stop",
-                        elem_id="advanced_compress_btn",
-                    )
-
-                with gr.Accordion(I18N["eng"]["danger_accordion"], open=False) as danger_accordion:
-                    danger_md = gr.Markdown(I18N["eng"]["danger_md"])
-                    confirm_clear = gr.Textbox(
-                        label=I18N["eng"]["confirm_clear_label"],
-                        lines=1,
-                        placeholder=I18N["eng"]["confirm_clear_placeholder"],
-                    )
-                    clear_btn = gr.Button(I18N["eng"]["clear_btn"], variant="stop", elem_id="clear_btn")
-
-        _disable_inputs = lambda: (gr.update(interactive=False), gr.update(interactive=False))
-        _enable_inputs = lambda: (gr.update(interactive=True), gr.update(interactive=True))
-
-        send.click(
-            fn=_disable_inputs,
-            inputs=None,
-            outputs=[message, send],
-            queue=False,
-        ).then(
-            fn=chat_once,
-            inputs=[message, image, thinking, web_search, chat_ui_state],
-            outputs=[chatbot, chat_ui_state, status, message],
-        ).then(
-            fn=_enable_inputs,
-            inputs=None,
-            outputs=[message, send],
-        )
-        message.submit(
-            fn=_disable_inputs,
-            inputs=None,
-            outputs=[message, send],
-            queue=False,
-        ).then(
-            fn=chat_once,
-            inputs=[message, image, thinking, web_search, chat_ui_state],
-            outputs=[chatbot, chat_ui_state, status, message],
-        ).then(
-            fn=_enable_inputs,
-            inputs=None,
-            outputs=[message, send],
-        )
-        clear_btn.click(
-            fn=clear_all_history,
-            inputs=[confirm_clear],
-            outputs=[chatbot, chat_ui_state, confirm_clear, status],
-        )
-        save_user_btn.click(
-            fn=save_user_md,
-            inputs=[user_profile],
-            outputs=[status],
-        )
-        manual_compress_btn.click(
-            fn=manual_compress,
-            inputs=None,
-            outputs=[status],
-        )
-        advanced_compress_btn.click(
-            fn=advanced_compress,
-            inputs=[advanced_compress_confirm],
-            outputs=[status],
-        )
-        demo.load(
-            fn=init_chat_ui,
-            inputs=None,
-            outputs=[chatbot, chat_ui_state, status],
-        )
-        demo.load(
-            fn=init_language,
-            inputs=None,
-            outputs=[
-                title_md,
-                message,
-                image,
-                thinking,
-                web_search,
-                send,
-                user_profile_accordion,
-                user_profile,
-                save_user_btn,
-                memory_accordion,
-                manual_compress_btn,
-                advanced_compress_warning_md,
-                advanced_compress_confirm,
-                advanced_compress_btn,
-                danger_accordion,
-                danger_md,
-                confirm_clear,
-                clear_btn,
-            ],
-        )
-
-    return demo
+            err = "Authentication failed. Set a valid OPENROUTER_API_KEY."
+            yield f"data: {json.dumps({'content': f'**Error:** {err}', 'status': 'Error'})}\n\n"
+        else:
+            yield f"data: {json.dumps({'content': f'**Error:** {exc}', 'status': 'Error'})}\n\n"
+        yield "data: [DONE]\n\n"
 
 
 def build_server() -> FastAPI:
     validate_auth_config()
-    demo = build_app()
     server = FastAPI(title="Virtual Life Auth Gateway")
+
+    server.mount("/static", StaticFiles(directory="static"), name="static")
 
     @server.get("/", response_class=HTMLResponse)
     async def root(request: Request):
         if auth_dependency(request):
             return RedirectResponse(url="/app", status_code=302)
         return RedirectResponse(url="/login", status_code=302)
+
+    @server.get("/app", response_class=HTMLResponse)
+    async def app_page(request: Request):
+        if not auth_dependency(request):
+            return RedirectResponse(url="/login", status_code=302)
+        return HTMLResponse(Path("static/index.html").read_text(encoding="utf-8"))
+
+    @server.middleware("http")
+    async def app_auth_middleware(request: Request, call_next):
+        if request.url.path.startswith("/api/") or request.url.path in ("/app", "/app/"):
+            if not auth_dependency(request):
+                # API requests return 401 instead of redirecting so JS can handle it
+                if request.url.path.startswith("/api/"):
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+                return RedirectResponse(url="/login", status_code=302)
+        return await call_next(request)
 
     @server.get("/login", response_class=HTMLResponse)
     async def login_page():
@@ -1372,15 +951,73 @@ def build_server() -> FastAPI:
         resp.delete_cookie(COOKIE_NAME, path="/")
         return resp
 
-    gr.mount_gradio_app(
-        app=server,
-        blocks=demo,
-        path="/app",
-        auth_dependency=auth_dependency,
-    )
+    # --- API Endpoints ---
+
+    @server.get("/api/init")
+    async def api_init():
+        ensure_files()
+        state = load_state()
+        rewrite_history_compressed(state)
+        chat_state = init_chat_ui()
+        user_md = load_user_md()
+        return {"chat_ui_state": chat_state["chat_ui_state"], "user_md": user_md}
+
+    @server.post("/api/save_profile")
+    async def api_save_profile(req: SaveProfileRequest):
+        return save_user_md(req.content)
+
+    @server.post("/api/manual_compress")
+    async def api_manual_compress():
+        return manual_compress()
+
+    @server.post("/api/advanced_compress")
+    async def api_advanced_compress(req: CompressRequest):
+        return advanced_compress(req.confirm_text)
+
+    @server.post("/api/clear_history")
+    async def api_clear_history(req: CompressRequest):
+        return clear_all_history(req.confirm_text)
+
+    @server.post("/api/pop_last_turn", response_model=PopTurnResponse)
+    async def api_pop_last_turn():
+        ensure_files()
+        state = load_state()
+        if not state.get("pending_turns"):
+            return PopTurnResponse(success=False, error="Cannot edit. The last turn is already compressed into long-term memory.")
+        
+        text = HISTORY_MD_PATH.read_text(encoding="utf-8")
+        matches = list(TURN_PATTERN.finditer(text))
+        if not matches:
+            return PopTurnResponse(success=False, error="Could not parse history.md to pop turn.")
+            
+        last_match = matches[-1]
+        text_before = text[:last_match.start()]
+        HISTORY_MD_PATH.write_text(text_before, encoding="utf-8")
+        
+        state["pending_turns"].pop()
+        save_state(state)
+        rewrite_history_compressed(state)
+        
+        user_plain = last_match.group("user").strip()
+        image_path = last_match.group("image").strip()
+        
+        image_data = None
+        if image_path:
+            img_file = Path(image_path)
+            if img_file.exists():
+                image_data = file_to_data_url(img_file)
+                img_file.unlink(missing_ok=True)
+                
+        return PopTurnResponse(success=True, user_text=user_plain, image_data=image_data)
+
+    @server.post("/api/chat")
+    async def api_chat(req: ChatRequest):
+        return StreamingResponse(sse_chat_generator(req), media_type="text/event-stream")
+
     return server
+
 
 
 if __name__ == "__main__":
     app = build_server()
-    uvicorn.run(app, host="127.0.0.1", port=7860)
+    uvicorn.run(app, host="127.0.0.1", port=7861)
