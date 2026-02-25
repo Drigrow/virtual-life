@@ -1,3 +1,30 @@
+// ── Theme Toggle ──────────────────────────────────────────────────────────────
+const themeToggleBtn = document.getElementById('theme_toggle');
+const themeIcon = document.getElementById('theme_icon');
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme);
+    themeIcon.textContent = theme === 'dark' ? '☀️' : '🌙';
+}
+
+// Initialise icon to match the theme already applied by the inline <head> script
+applyTheme(document.documentElement.getAttribute('data-theme') || 'light');
+
+themeToggleBtn.addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme');
+    const next = current === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('theme', next); // manual override
+    applyTheme(next);
+});
+
+// Follow OS preference changes only when there is no manual override
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    if (!localStorage.getItem('theme')) {
+        applyTheme(e.matches ? 'dark' : 'light');
+    }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
 const chatbox = document.getElementById('chatbox');
 const messageInput = document.getElementById('message_input');
 const sendBtn = document.getElementById('send_btn');

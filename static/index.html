@@ -6,11 +6,22 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Virtual Life</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <!-- Apply saved/system theme before first paint to avoid flash -->
+  <script>
+    (function () {
+      const saved = localStorage.getItem('theme');
+      const preferred = saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+      document.documentElement.setAttribute('data-theme', preferred);
+    })();
+  </script>
   <!-- We'll use marked.js for client-side markdown rendering -->
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
 </head>
 
 <body>
+  <button id="theme_toggle" title="Toggle dark / light mode" aria-label="Toggle theme">
+    <span id="theme_icon">🌙</span>
+  </button>
   <div class="container">
     <div id="title_md" class="title"># Virtual Life Chat<br><small>Model: google/gemini-3-flash-preview</small></div>
 
@@ -28,9 +39,9 @@
         </div>
         <div class="quick_actions" style="display:flex; gap:10px; margin-top:8px;">
           <button id="edit_last_btn" class="secondary-btn"
-            style="flex:1; font-size:13px; padding:6px; background:#f1f5f9;" disabled>📝 Edit Last</button>
+            style="flex:1; font-size:13px; padding:6px; background:var(--quick-btn-bg);" disabled>📝 Edit Last</button>
           <button id="regenerate_btn" class="secondary-btn"
-            style="flex:1; font-size:13px; padding:6px; background:#f1f5f9;" disabled>🔄 Regenerate</button>
+            style="flex:1; font-size:13px; padding:6px; background:var(--quick-btn-bg);" disabled>🔄 Regenerate</button>
         </div>
         <div id="status_md" class="status">
           <p>Ready.</p>
