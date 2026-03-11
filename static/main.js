@@ -188,13 +188,15 @@ async function internalSendMessage(text, base64Image) {
         const reader = response.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let done = false;
+        let buffer = '';
 
         while (!done) {
             const { value, done: readerDone } = await reader.read();
             done = readerDone;
             if (value) {
-                const chunk = decoder.decode(value, { stream: true });
-                const lines = chunk.split('\n');
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop(); // keep the last partial line in the buffer
 
                 for (let line of lines) {
                     if (line.startsWith('data: ')) {
@@ -216,6 +218,20 @@ async function internalSendMessage(text, base64Image) {
                     }
                 }
             }
+        }
+
+        // Sync final state with the server once streaming is finished to guarantee match
+        try {
+            const syncResponse = await fetch('/api/init');
+            if (syncResponse.ok) {
+                const data = await syncResponse.json();
+                if (data.chat_ui_state) {
+                    chatHistory = data.chat_ui_state;
+                    renderChat();
+                }
+            }
+        } catch (e) {
+            console.error('Final sync error:', e);
         }
     } catch (err) {
         updateLastMessage(`**Error:** ${err.message}`);
