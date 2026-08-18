@@ -6,6 +6,7 @@ import mimetypes
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 from datetime import datetime
@@ -25,10 +26,14 @@ from PIL import Image
 
 load_dotenv()
 
-MODEL_NAME = "google/gemini-3-flash-preview"
+MODEL_NAME = "google/gemini-3.1-flash-lite-preview"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 COMPRESS_EVERY_TURNS = 10
 MAX_UI_TURNS = 50  # How many recent turns /api/init returns to the browser
+COMPRESS_SIZE_THRESHOLD = 3000  # Rolling-compress pending text when it reaches ~3000 chars
+MAX_SUMMARY_CHARS = 8000  # Safety cap for a single rolling summary
+FACTS_EAGER_TURNS = 4  # Eagerly extract facts once this many pending turns accumulate
+MEMORY_SIZE_BUDGET = 8000  # Target max chars for memory.md
 AUTH_MAX_ATTEMPTS = int(os.getenv("AUTH_MAX_ATTEMPTS", "5"))
 AUTH_LOCKOUT_SECONDS = int(os.getenv("AUTH_LOCKOUT_SECONDS", "300"))
 TRUSTED_SESSION_DAYS = int(os.getenv("TRUSTED_SESSION_DAYS", "30"))
@@ -46,6 +51,7 @@ TRUSTED_DEVICES_PATH = Path("trusted_devices.json")
 _AUTH_LOCK = threading.Lock()
 _AUTH_STATE: dict[str, dict[str, float | int]] = {}
 _STATE_LOCK = threading.Lock()
+_MEMORY_LOCK = threading.Lock()
 
 TURN_PATTERN = re.compile(
     r"## Turn \((?P<ts>.*?)\)\n"
@@ -59,44 +65,6 @@ LEGACY_TURN_PATTERN = re.compile(
     r"## Turn \((?P<ts>.*?)\)\s*\n\n\*\*User\*\*\s*\n\n(?P<user>.*?)\s*\n\n\*\*Assistant\*\*\s*\n\n(?P<assistant>.*?)(?=\n## Turn \(|\Z)",
     re.DOTALL,
 )
-
-MEMORY_TOOL = {
-    "type": "function",
-    "function": {
-        "name": "save_memory_fact",
-        "description": "Save durable user memory (preferences, profile facts, long-term goals).",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "fact": {
-                    "type": "string",
-                    "description": "One concise durable memory fact about the user.",
-                }
-            },
-            "required": ["fact"],
-            "additionalProperties": False,
-        },
-    },
-}
-
-WEB_SEARCH_TRIGGER_TERMS = [
-    "latest",
-    "today",
-    "current",
-    "news",
-    "recent",
-    "right now",
-    "this week",
-    "this month",
-    "this year",
-    "price",
-    "stock",
-    "weather",
-    "score",
-    "result",
-    "release date",
-    "update",
-]
 
 # I18N and CSS moved to frontend.
 
@@ -286,12 +254,6 @@ def get_client() -> OpenAI:
     )
 
 
-def should_use_web_search(user_text: str) -> bool:
-    text = (user_text or "").strip().lower()
-    if not text:
-        return False
-    return any(term in text for term in WEB_SEARCH_TRIGGER_TERMS)
-
 # Language detection removed as I18N was removed in favor of HTML bindings.
 
 
@@ -299,7 +261,7 @@ def ensure_files() -> None:
     IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
     if not STATE_PATH.exists():
-        save_state({"compressed_memories": [], "pending_turns": []})
+        save_state({"compressed_memories": [], "pending_turns": [], "rolling_summary": "", "facts_watermark": 0})
 
     if not HISTORY_MD_PATH.exists():
         HISTORY_MD_PATH.write_text("# Chat History\n\n", encoding="utf-8")
@@ -325,16 +287,22 @@ def load_state() -> dict:
     try:
         state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        state = {"compressed_memories": [], "pending_turns": []}
+        state = {"compressed_memories": [], "pending_turns": [], "rolling_summary": "", "facts_watermark": 0}
     if not isinstance(state, dict):
-        state = {"compressed_memories": [], "pending_turns": []}
+        state = {"compressed_memories": [], "pending_turns": [], "rolling_summary": "", "facts_watermark": 0}
 
     state.setdefault("compressed_memories", [])
     state.setdefault("pending_turns", [])
+    state.setdefault("rolling_summary", "")
+    state.setdefault("facts_watermark", 0)
     if not isinstance(state["compressed_memories"], list):
         state["compressed_memories"] = []
     if not isinstance(state["pending_turns"], list):
         state["pending_turns"] = []
+    if not isinstance(state["rolling_summary"], str):
+        state["rolling_summary"] = ""
+    if not isinstance(state["facts_watermark"], int) or isinstance(state["facts_watermark"], bool):
+        state["facts_watermark"] = 0
 
     cleaned_pending = []
     for turn in state["pending_turns"]:
@@ -345,6 +313,7 @@ def load_state() -> dict:
         if user or assistant:
             cleaned_pending.append({"user": user, "assistant": assistant})
     state["pending_turns"] = cleaned_pending
+    state["facts_watermark"] = min(max(0, int(state["facts_watermark"])), len(cleaned_pending))
 
     cleaned_comp = []
     for item in state["compressed_memories"]:
@@ -355,6 +324,15 @@ def load_state() -> dict:
         if isinstance(sid, int) and summary:
             cleaned_comp.append({"id": sid, "summary": summary})
     state["compressed_memories"] = cleaned_comp
+
+    # One-time migration: fold all legacy compressed summaries into a single
+    # rolling_summary, then drop the legacy list so it is never re-joined.
+    if state["compressed_memories"] and not state["rolling_summary"].strip():
+        parts = [item["summary"] for item in state["compressed_memories"] if item["summary"].strip()]
+        if parts:
+            state["rolling_summary"] = "\n\n---\n\n".join(parts)
+        state["compressed_memories"] = []
+        save_state(state)
     return state
 
 
@@ -492,7 +470,7 @@ def clear_all_history(confirm_text: str) -> dict:
     if (confirm_text or "").strip() != required:
         return {"cleared": False, "status": f"Blocked. Type exactly `{required}` to confirm irreversible deletion."}
 
-    empty_state = {"compressed_memories": [], "pending_turns": []}
+    empty_state = {"compressed_memories": [], "pending_turns": [], "rolling_summary": "", "facts_watermark": 0}
     save_state(empty_state)
 
     HISTORY_MD_PATH.write_text("# Chat History\n\n", encoding="utf-8")
@@ -507,9 +485,23 @@ def clear_all_history(confirm_text: str) -> dict:
     return {"cleared": True, "status": "History cleared permanently: all conversations, memory, compressed history, and saved images were deleted."}
 
 
-def summarize_turns(client: OpenAI, turns: list[dict], prior_summaries: list[dict] | None = None) -> str:
+def estimate_text_size(text: str) -> int:
+    # Loose budget: character count is a fine proxy for token/size pressure.
+    return len(text or "")
+
+
+def _strip_json_fences(text: str) -> str:
+    cleaned = (text or "").strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```[a-zA-Z]*\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
+
+
+def rolling_summarize(client: OpenAI, rolling_summary: str, batch: list[dict]) -> dict:
+    """Merge (old rolling summary + new batch) into one updated summary + new facts."""
     turns_text = []
-    for idx, turn in enumerate(turns, start=1):
+    for idx, turn in enumerate(batch, start=1):
         if not isinstance(turn, dict):
             continue
         user = str(turn.get("user", "") or "")
@@ -517,26 +509,24 @@ def summarize_turns(client: OpenAI, turns: list[dict], prior_summaries: list[dic
         turns_text.append(f"Turn {idx}\nUser: {user}\nAssistant: {assistant}")
 
     if not turns_text:
-        return "No valid turns to summarize."
-
-    prior_context = ""
-    if prior_summaries:
-        prior_parts = []
-        for item in prior_summaries:
-            prior_parts.append(f"Summary {item['id']}:\n{item['summary']}")
-        prior_context = (
-            "Here is the existing compressed memory from earlier conversations. "
-            "Build upon this context and avoid repeating information already captured:\n\n"
-            + "\n\n".join(prior_parts)
-            + "\n\n---\n\n"
-        )
+        return {"summary": rolling_summary, "facts": []}
 
     prompt = (
-        "Compress these chat turns into compact long-term memory.\n"
-        "Keep durable user preferences, facts, goals, and open tasks.\n"
-        "Do not include chain-of-thought. Use concise bullet points.\n\n"
-        + prior_context
-        + "New turns to compress:\n\n"
+        "You maintain a rolling summary of a long-running conversation.\n"
+        "Below is the existing rolling summary and a new batch of turns.\n\n"
+        "Produce an UPDATED single rolling summary that:\n"
+        "- Keeps recent facts, open goals, and anything still relevant.\n"
+        "- Drops resolved, expired, and one-off items.\n"
+        "- Does NOT restate the user persona/identity (that lives separately in user.md);\n"
+        "  only record new facts about the user beyond that persona.\n"
+        "- Deduplicates; do not repeat the same information.\n\n"
+        "Separately, list NEW durable long-term facts about the user worth persisting\n"
+        "(stable preferences, health, long-term goals). Do NOT include one-off requests.\n\n"
+        "Respond with ONLY a JSON object, no markdown fences, no commentary, shaped like:\n"
+        '{"summary": "...", "facts": ["...", "..."]}\n\n'
+        "Existing rolling summary:\n"
+        f"{rolling_summary or '(none)'}\n\n"
+        "New turns:\n"
         + "\n\n".join(turns_text)
     )
 
@@ -547,28 +537,94 @@ def summarize_turns(client: OpenAI, turns: list[dict], prior_summaries: list[dic
     )
     msg = response.choices[0].message if response and response.choices else None
     content = (getattr(msg, "content", "") or "").strip() if msg else ""
-    return content or "Summary unavailable due to empty model response."
+
+    summary = ""
+    facts: list[str] = []
+    try:
+        data = json.loads(_strip_json_fences(content))
+        if not isinstance(data, dict):
+            raise ValueError("not an object")
+        raw_summary = str(data.get("summary", "") or "").strip()
+        raw_facts = data.get("facts", [])
+        if isinstance(raw_facts, list):
+            facts = [str(f).strip() for f in raw_facts if str(f).strip()]
+        summary = raw_summary or content
+    except Exception:
+        # Degrade gracefully: keep raw response as summary, no facts.
+        summary = content
+        facts = []
+
+    summary = (summary or rolling_summary or "").strip()
+    if len(summary) > MAX_SUMMARY_CHARS:
+        summary = summary[:MAX_SUMMARY_CHARS]
+    return {"summary": summary, "facts": facts}
+
+
+def extract_facts_only(client: OpenAI, turns: list[dict]) -> list[str]:
+    """Lightweight facts-only extraction used before the compression threshold."""
+    turns_text = []
+    for idx, turn in enumerate(turns, start=1):
+        if not isinstance(turn, dict):
+            continue
+        user = str(turn.get("user", "") or "")
+        assistant = str(turn.get("assistant", "") or "")
+        turns_text.append(f"Turn {idx}\nUser: {user}\nAssistant: {assistant}")
+
+    if not turns_text:
+        return []
+
+    prompt = (
+        "These are recent conversation turns.\n"
+        "Extract any NEW durable long-term facts about the user worth remembering "
+        "across sessions (stable preferences, health, long-term goals, identity).\n"
+        "Do NOT include one-off requests, trivial events, or persona boilerplate.\n"
+        'Respond with ONLY a JSON array of strings, e.g. ["fact1", "fact2"].\n'
+        "If nothing is worth saving, respond with [].\n\n"
+        + "\n\n".join(turns_text)
+    )
+
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        extra_body={"reasoning": {"enabled": False}},
+    )
+    msg = response.choices[0].message if response and response.choices else None
+    content = (getattr(msg, "content", "") or "").strip() if msg else ""
+
+    try:
+        data = json.loads(_strip_json_fences(content))
+        if isinstance(data, list):
+            return [str(f).strip() for f in data if str(f).strip()]
+    except Exception:
+        pass
+    return []
 
 
 def rewrite_history_compressed(state: dict) -> None:
-    lines = ["# History Compressed", "", "This file includes compressed summaries and pending uncompressed turns.", ""]
+    lines = [
+        "# History Compressed",
+        "",
+        "Rolling summary of older conversation, plus recent uncompressed turns.",
+        "",
+    ]
 
-    lines.append("## Compressed Summaries")
+    rolling = str(state.get("rolling_summary", "") or "").strip()
+    lines.append("## Rolling Summary")
     lines.append("")
-    if state["compressed_memories"]:
-        for item in state["compressed_memories"]:
-            lines.append(f"### Summary {item['id']}")
-            lines.append("")
-            lines.append(item["summary"])
-            lines.append("")
+    if rolling:
+        lines.append(rolling)
     else:
         lines.append("(none)")
-        lines.append("")
+    lines.append("")
 
+    # Show ALL pending turns: the list is already bounded by the compression
+    # trigger (>= COMPRESS_EVERY_TURNS turns or >= COMPRESS_SIZE_THRESHOLD
+    # chars), so nothing recent is ever hidden from the model.
+    pending = state.get("pending_turns", []) or []
     lines.append("## Pending Turns (Uncompressed)")
     lines.append("")
-    if state["pending_turns"]:
-        for idx, turn in enumerate(state["pending_turns"], start=1):
+    if pending:
+        for idx, turn in enumerate(pending, start=1):
             lines.append(f"### Turn {idx}")
             lines.append("")
             lines.append(f"User: {turn['user']}")
@@ -582,169 +638,124 @@ def rewrite_history_compressed(state: dict) -> None:
     HISTORY_COMPRESSED_MD_PATH.write_text("\n".join(lines), encoding="utf-8")
 
 
-def maybe_compress_history(client: OpenAI, state: dict) -> None:
-    while len(state["pending_turns"]) >= COMPRESS_EVERY_TURNS:
-        batch = state["pending_turns"][:COMPRESS_EVERY_TURNS]
-        try:
-            summary_text = summarize_turns(client, batch, prior_summaries=state["compressed_memories"])
-            next_id = len(state["compressed_memories"]) + 1
-            state["compressed_memories"].append({"id": next_id, "summary": summary_text})
-            state["pending_turns"] = state["pending_turns"][COMPRESS_EVERY_TURNS:]
-        except Exception:
-            # Do not break chat flow on summarization failures; keep pending turns as-is.
-            break
-
-
 def manual_compress() -> dict:
-    """Compress current pending turns regardless of count."""
+    """Force one rolling compression of all pending turns regardless of threshold."""
     try:
         ensure_files()
-        state = load_state()
-        pending = state["pending_turns"]
+        with _STATE_LOCK:
+            state = load_state()
+            pending = list(state.get("pending_turns", []) or [])
+            rolling_summary = str(state.get("rolling_summary", "") or "")
         if not pending:
             return {"status": "Nothing to compress — no pending turns."}
 
         client = get_client()
-        summary_text = summarize_turns(client, pending, prior_summaries=state["compressed_memories"])
-        next_id = len(state["compressed_memories"]) + 1
-        state["compressed_memories"].append({"id": next_id, "summary": summary_text})
-        state["pending_turns"] = []
-        save_state(state)
-        rewrite_history_compressed(state)
-        return {"status": f"Compressed {len(pending)} pending turn(s) into Summary #{next_id}."}
+        result = rolling_summarize(client, rolling_summary, pending)
+
+        with _STATE_LOCK:
+            state = load_state()
+            if state.get("pending_turns", []) == pending:
+                state["rolling_summary"] = result.get("summary", "")
+                state["pending_turns"] = []
+                state["facts_watermark"] = 0
+                save_state(state)
+                rewrite_history_compressed(state)
+            else:
+                return {"status": "Pending turns changed during compression — please retry."}
+
+        facts = result.get("facts") or []
+        if facts:
+            try:
+                merged = merge_memory_with_model(client, facts)
+            except Exception as exc:
+                return {"status": f"Compressed {len(pending)} turn(s) into the rolling summary, but memory merge failed: {exc}"}
+            if not merged:
+                return {"status": f"Compressed {len(pending)} turn(s) into the rolling summary, but memory merge was skipped (invalid model output); original memory.md kept."}
+        return {"status": f"Compressed {len(pending)} pending turn(s) into the rolling summary."}
     except Exception as exc:
         return {"status": f"Compression failed: {exc}"}
 
 
 def advanced_compress(confirm_text: str = "") -> dict:
-    """Re-chunk and re-summarize compressed memories to reduce file size."""
+    """Full dedupe/merge of memory.md (no new facts; forces a tidy-up)."""
     if (confirm_text or "").strip() != "COMPRESS":
         return {"status": "Blocked. Type exactly `COMPRESS` in the confirmation box to proceed."}
     try:
         ensure_files()
-        state = load_state()
-        memories = state["compressed_memories"]
-
-        if len(memories) <= 1:
-            return {"status": "Not enough compressed summaries for advanced compression (need > 1)."}
-
-        first_summary = memories[0]  # Keep the 1st summary intact
-        rest = memories[1:]  # Summaries to re-chunk
-
-        if len(rest) < 2:
-            return {"status": "Not enough summaries beyond the initial one to compress further."}
-
         client = get_client()
-        chunk_size = 5
-        new_summaries = [first_summary]  # Preserve the 1st
-        next_id = 2  # Re-number starting from 2
-
-        for i in range(0, len(rest), chunk_size):
-            chunk = rest[i : i + chunk_size]
-            if len(chunk) == 1:
-                # Single summary, keep as-is but re-number
-                new_summaries.append({"id": next_id, "summary": chunk[0]["summary"]})
-                next_id += 1
-                continue
-
-            re_summary = summarize_compressed_chunk(client, chunk)
-            new_summaries.append({"id": next_id, "summary": re_summary})
-            next_id += 1
-
-        original_count = len(memories)
-        state["compressed_memories"] = new_summaries
-        save_state(state)
-        rewrite_history_compressed(state)
-        return {"status": 
-            f"Advanced compression done: {original_count} summaries → {len(new_summaries)} summaries. "
-            f"(1st summary preserved, rest grouped by {chunk_size} and re-summarized.)"
-        }
+        merged = merge_memory_with_model(client, [])
+        if not merged:
+            return {"status": "Memory consolidation skipped: model output invalid; original memory.md kept (backup in memory.md.bak)."}
+        return {"status": "Memory file deduplicated and consolidated (backup in memory.md.bak)."}
     except Exception as exc:
         return {"status": f"Advanced compression failed: {exc}"}
 
 
+def merge_memory_with_model(client: OpenAI, new_facts: list[str]) -> bool:
+    """Merge new facts into memory.md: dedupe, prune temporary items, enforce budget.
 
-def summarize_compressed_chunk(client: OpenAI, chunk: list[dict]) -> str:
-    """Re-summarize a chunk of already-compressed summaries into one."""
-    parts = []
-    for item in chunk:
-        parts.append(f"Summary #{item['id']}:\n{item['summary']}")
+    Runs under _MEMORY_LOCK (background threads / API threadpool only, never the
+    event loop) so concurrent merges cannot lose each other's changes. Writes a
+    backup of the previous content to memory.md.bak before overwriting.
 
-    prompt = (
-        "You are given multiple compressed memory summaries from earlier conversations. "
-        "Merge and further compress them into a single concise summary.\n"
-        "Keep durable user preferences, facts, goals, and open tasks.\n"
-        "Remove redundancies. Use concise bullet points.\n\n"
-        + "\n\n".join(parts)
-    )
+    Returns True if memory.md was updated, False if it was skipped (invalid output).
+    """
+    ensure_files()
+    with _MEMORY_LOCK:
+        existing = MEMORY_MD_PATH.read_text(encoding="utf-8")
 
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        extra_body={"reasoning": {"enabled": False}},
-    )
-    msg = response.choices[0].message if response and response.choices else None
-    content = (getattr(msg, "content", "") or "").strip() if msg else ""
-    return content or "Summary unavailable due to empty model response."
+        fact_block = "\n".join(f"- {f}" for f in new_facts if str(f).strip()) if new_facts else "(no new facts)"
 
+        prompt = (
+            "You maintain `memory.md`, the assistant's LONG-TERM memory about the user.\n"
+            "It must contain EXACTLY two sections under the `# Memory` heading:\n"
+            '- "## 长期稳定（Durable）": stable identity, preferences, health, relationships, goals — '
+            "these persist long-term and are rarely removed.\n"
+            '- "## 近期临时（Temporary）": recent one-off events and temporary states — '
+            "these are pruned aggressively on every merge.\n\n"
+            "Below are the current file content and new facts.\n"
+            "Produce the UPDATED COMPLETE memory.md content (pure markdown, no code block):\n"
+            "- Start with the `# Memory` heading.\n"
+            "- Merge and deduplicate; near-duplicates collapse into one.\n"
+            "- Drop resolved/expired/contradictory items; prune the Temporary section hard.\n"
+            f"- Keep the total under ~{MEMORY_SIZE_BUDGET} characters; compress aggressively if over.\n\n"
+            "Current memory.md:\n"
+            f"{existing}\n\n"
+            "New facts:\n"
+            f"{fact_block}"
+        )
 
-def append_memory_fact(fact: str) -> bool:
-    fact = fact.strip()
-    if not fact:
-        return False
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
+            extra_body={"reasoning": {"enabled": False}},
+        )
+        msg = response.choices[0].message if response and response.choices else None
+        content = (getattr(msg, "content", "") or "").strip() if msg else ""
 
-    existing = MEMORY_MD_PATH.read_text(encoding="utf-8")
-    marker = f"- {fact}"
-    if marker in existing:
-        return False
+        # Safety checks before overwriting: must be non-empty and keep the heading.
+        if not content:
+            return False
+        cleaned = _strip_json_fences(content)
+        if not cleaned.startswith("# Memory"):
+            print("[memory] merge skipped: model output did not start with `# Memory`; original kept.", file=sys.stderr)
+            return False
 
-    with MEMORY_MD_PATH.open("a", encoding="utf-8") as f:
-        f.write(f"- {fact}\n")
-    return True
+        # Hard budget enforcement: prune the temporary section if still over budget.
+        if len(cleaned) > MEMORY_SIZE_BUDGET:
+            marker = "## 近期临时"
+            idx = cleaned.find(marker)
+            if idx > 0:
+                cleaned = cleaned[:idx].rstrip() + "\n"
+                print("[memory] memory.md exceeded budget; pruned the temporary section.", file=sys.stderr)
+            else:
+                print(f"[memory] memory.md still over budget ({len(cleaned)} chars) with no temporary section to prune.", file=sys.stderr)
 
-
-def extract_memory_with_function_call(client: OpenAI, user_text: str, assistant_text: str) -> int:
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "If there is durable user memory worth saving, call save_memory_fact. "
-                    "Examples: stable preferences, long-term goals, profile facts. "
-                    "Do not save one-off requests."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"User message:\n{user_text}\n\nAssistant response:\n{assistant_text}",
-            },
-        ],
-        tools=[MEMORY_TOOL],
-        tool_choice="auto",
-        extra_body={"reasoning": {"enabled": False}},
-    )
-
-    message = response.choices[0].message
-    tool_calls = getattr(message, "tool_calls", None) or []
-    saved = 0
-
-    for tc in tool_calls:
-        func = getattr(tc, "function", None)
-        if not func or getattr(func, "name", "") != "save_memory_fact":
-            continue
-
-        raw_args = getattr(func, "arguments", "{}") or "{}"
-        try:
-            args = json.loads(raw_args)
-        except json.JSONDecodeError:
-            continue
-
-        fact = (args.get("fact") or "").strip()
-        if append_memory_fact(fact):
-            saved += 1
-
-    return saved
+        # Backup the previous content, then overwrite.
+        backup_path = MEMORY_MD_PATH.with_suffix(".md.bak")
+        backup_path.write_text(existing, encoding="utf-8")
+        MEMORY_MD_PATH.write_text(cleaned + "\n", encoding="utf-8")
+        return True
 
 
 def build_context_messages(user_message: dict) -> list[dict]:
@@ -764,17 +775,26 @@ def build_context_messages(user_message: dict) -> list[dict]:
         },
         {
             "role": "system",
-            "content": f"Use this chat context file:\n\n{compressed_text}",
-        },
-        {
-            "role": "system",
-            "content": f"Use this memory file:\n\n{memory_text}",
+            "content": (
+                "Use this recent conversation context file — a rolling summary of older "
+                "conversation plus recent turns (short/medium-term memory):\n\n"
+                f"{compressed_text}"
+            ),
         },
         {
             "role": "system",
             "content": (
-                "Use this user profile file as identity memory (who the user is, role-play persona, "
-                f"preferences, and constraints):\n\n{user_text}"
+                "Use this long-term memory file — durable facts about the user (preferences, "
+                "health, goals, identity). Treat it as authoritative long-term memory and prefer "
+                f"it over the rolling summary when they conflict:\n\n{memory_text}"
+            ),
+        },
+        {
+            "role": "system",
+            "content": (
+                "Use this user profile file as the highest-priority identity memory (who the "
+                "user is, role-play persona, preferences, and constraints); it overrides "
+                f"conflicts in the other files:\n\n{user_text}"
             ),
         },
         user_message,
@@ -787,8 +807,6 @@ def build_context_messages(user_message: dict) -> list[dict]:
 class ChatRequest(BaseModel):
     message: str
     image_data: str | None = None
-    thinking: bool = False
-    web_search: bool = True
 
 class SaveProfileRequest(BaseModel):
     content: str
@@ -833,13 +851,13 @@ async def sse_chat_generator(chat_req: ChatRequest):
             Path(temp_image_path).unlink(missing_ok=True)
 
         context_messages = build_context_messages(user_message)
-        use_web_search = bool(chat_req.web_search) and should_use_web_search(user_plain_text)
 
-        extra_body = {"reasoning": {"enabled": bool(chat_req.thinking)}}
-        if use_web_search:
-            extra_body["plugins"] = [{"id": "web"}]
+        # Reasoning (thinking) and web search are intentionally disabled: not
+        # needed for role-play, and OpenRouter's `plugins` web search is
+        # deprecated (use the `tools`-based web_search tool if ever needed).
+        extra_body = {"reasoning": {"enabled": False}}
 
-        yield f"data: {json.dumps({'status': f'Thinking... (Web Search: {use_web_search})'})}\n\n"
+        yield f"data: {json.dumps({'status': 'Thinking...'})}\n\n"
 
         stream = client.chat.completions.create(
             model=MODEL_NAME,
@@ -883,37 +901,78 @@ async def sse_chat_generator(chat_req: ChatRequest):
         yield "data: [DONE]\n\n"
 
         def _post_process() -> None:
-            # Summarize outside the lock (network I/O); commit under the lock
-            # (fast file I/O only) so the event loop is never held up.
+            # Rolling compression and eager fact extraction run as network I/O
+            # outside _STATE_LOCK; commits (fast file I/O only) happen under the
+            # lock so the event loop is never held up.
             try:
                 while True:
                     with _STATE_LOCK:
                         state = load_state()
-                        if len(state["pending_turns"]) < COMPRESS_EVERY_TURNS:
-                            break
-                        batch = state["pending_turns"][:COMPRESS_EVERY_TURNS]
-                        prior = state["compressed_memories"]
-
-                    try:
-                        summary_text = summarize_turns(client, batch, prior_summaries=prior)
-                    except Exception:
-                        break
-
-                    with _STATE_LOCK:
-                        state = load_state()
-                        if state["pending_turns"][:COMPRESS_EVERY_TURNS] == batch:
-                            state["compressed_memories"].append(
-                                {"id": len(state["compressed_memories"]) + 1, "summary": summary_text}
-                            )
-                            state["pending_turns"] = state["pending_turns"][COMPRESS_EVERY_TURNS:]
-                            save_state(state)
-                            rewrite_history_compressed(state)
+                        pending = list(state.get("pending_turns", []) or [])
+                        wm = int(state.get("facts_watermark", 0) or 0)
+                        joined = "\n\n".join(
+                            f"User: {t.get('user', '')}\nAssistant: {t.get('assistant', '')}"
+                            for t in pending
+                        )
+                        should_compress = (
+                            len(pending) >= COMPRESS_EVERY_TURNS
+                            or estimate_text_size(joined) >= COMPRESS_SIZE_THRESHOLD
+                        )
+                        if should_compress:
+                            batch = pending
+                            rolling_summary = str(state.get("rolling_summary", "") or "")
+                            eager_tail = []
                         else:
-                            continue
-            except Exception:
-                pass
-            try:
-                extract_memory_with_function_call(client, user_plain_text, answer)
+                            batch = []
+                            eager_tail = pending[min(wm, len(pending)):]
+                            rolling_summary = ""
+
+                    if batch:
+                        try:
+                            result = rolling_summarize(client, rolling_summary, batch)
+                        except Exception:
+                            break
+
+                        with _STATE_LOCK:
+                            state = load_state()
+                            if state.get("pending_turns", []) == batch:
+                                state["rolling_summary"] = result.get("summary", "")
+                                state["pending_turns"] = []
+                                state["facts_watermark"] = 0
+                                save_state(state)
+                                rewrite_history_compressed(state)
+                            else:
+                                # New turns arrived while summarizing; loop again.
+                                continue
+
+                        facts = result.get("facts") or []
+                        if facts:
+                            try:
+                                merge_memory_with_model(client, facts)
+                            except Exception as exc:
+                                print(f"[memory] merge failed: {exc}", file=sys.stderr)
+                        continue
+
+                    if len(eager_tail) >= FACTS_EAGER_TURNS:
+                        try:
+                            eager_facts = extract_facts_only(client, eager_tail)
+                        except Exception:
+                            break
+
+                        if eager_facts:
+                            try:
+                                merge_memory_with_model(client, eager_facts)
+                            except Exception as exc:
+                                print(f"[memory] eager merge failed: {exc}", file=sys.stderr)
+
+                        with _STATE_LOCK:
+                            state = load_state()
+                            cur_len = len(state.get("pending_turns", []) or [])
+                            state["facts_watermark"] = min(cur_len, wm + len(eager_tail))
+                            save_state(state)
+                        continue
+
+                    break
             except Exception:
                 pass
 

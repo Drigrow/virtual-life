@@ -2,7 +2,7 @@
 
 > A personal AI companion that remembers — built for long-term, immersive role-play and conversation.
 
-**Virtual Life** is a self-hosted chat app powered by [OpenRouter](https://openrouter.ai) (default model: `google/gemini-3-flash-preview`). The name reflects the idea of a *second life* running alongside yours: an AI that accumulates memory over time, knows who you are, and stays consistent across every conversation — like a persistent virtual relationship.
+**Virtual Life** is a self-hosted chat app powered by [OpenRouter](https://openrouter.ai) (default model: `google/gemini-3.1-flash-lite-preview`). The name reflects the idea of a *second life* running alongside yours: an AI that accumulates memory over time, knows who you are, and stays consistent across every conversation — like a persistent virtual relationship.
 
 ---
 

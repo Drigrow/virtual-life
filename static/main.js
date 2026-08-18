@@ -34,9 +34,6 @@ const imageInput = document.getElementById('image_input');
 const imagePreview = document.getElementById('image_preview');
 const clearImageBtn = document.getElementById('clear_image_btn');
 
-const thinkingCb = document.getElementById('thinking_cb');
-const webSearchCb = document.getElementById('web_search_cb');
-
 // Accordion elements
 const userProfile = document.getElementById('user_profile');
 const saveUserBtn = document.getElementById('save_user_btn');
@@ -164,9 +161,7 @@ async function internalSendMessage(text, base64Image) {
 
     const payload = {
         message: text,
-        image_data: base64Image,
-        thinking: thinkingCb.checked,
-        web_search: webSearchCb.checked
+        image_data: base64Image
     };
 
     try {
