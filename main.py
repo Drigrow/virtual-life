@@ -28,6 +28,7 @@ load_dotenv()
 MODEL_NAME = "google/gemini-3-flash-preview"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 COMPRESS_EVERY_TURNS = 10
+MAX_UI_TURNS = 50  # How many recent turns /api/init returns to the browser
 AUTH_MAX_ATTEMPTS = int(os.getenv("AUTH_MAX_ATTEMPTS", "5"))
 AUTH_LOCKOUT_SECONDS = int(os.getenv("AUTH_LOCKOUT_SECONDS", "300"))
 TRUSTED_SESSION_DAYS = int(os.getenv("TRUSTED_SESSION_DAYS", "30"))
@@ -44,6 +45,7 @@ IMAGE_DIR = Path("chat_images")
 TRUSTED_DEVICES_PATH = Path("trusted_devices.json")
 _AUTH_LOCK = threading.Lock()
 _AUTH_STATE: dict[str, dict[str, float | int]] = {}
+_STATE_LOCK = threading.Lock()
 
 TURN_PATTERN = re.compile(
     r"## Turn \((?P<ts>.*?)\)\n"
@@ -429,7 +431,7 @@ def append_turn_history(user_plain: str, assistant_text: str, image_path: str | 
         f.write(f"<!-- IMAGE_PATH: {img} -->\n\n")
 
 
-def load_chat_history_for_ui() -> list[dict]:
+def load_chat_history_for_ui(max_turns: int | None = None) -> list[dict]:
     ensure_files()
     text = HISTORY_MD_PATH.read_text(encoding="utf-8")
     turns = []
@@ -444,8 +446,7 @@ def load_chat_history_for_ui() -> list[dict]:
             if image_path:
                 img_file = Path(image_path)
                 if img_file.exists():
-                    data_url = file_to_data_url(img_file)
-                    user_content = f"{user_plain}\n\n![uploaded image]({data_url})"
+                    user_content = f"{user_plain}\n\n![uploaded image](/images/{img_file.name})"
                 else:
                     user_content = f"{user_plain}\n\n[Image missing: {image_path}]"
             else:
@@ -453,6 +454,9 @@ def load_chat_history_for_ui() -> list[dict]:
 
             turns.append({"role": "user", "content": user_content})
             turns.append({"role": "assistant", "content": assistant})
+        if max_turns is not None:
+            # Keep the most recent `max_turns` conversation turns (2 messages each).
+            turns = turns[-max_turns * 2 :]
         return turns
 
     legacy_matches = list(LEGACY_TURN_PATTERN.finditer(text))
@@ -461,12 +465,14 @@ def load_chat_history_for_ui() -> list[dict]:
         assistant = m.group("assistant").strip()
         turns.append({"role": "user", "content": user_plain})
         turns.append({"role": "assistant", "content": assistant})
+    if max_turns is not None:
+        turns = turns[-max_turns * 2 :]
 
     return turns
 
 
 def init_chat_ui() -> dict:
-    initial = load_chat_history_for_ui()
+    initial = load_chat_history_for_ui(max_turns=MAX_UI_TURNS)
     return {"chat_ui_state": initial, "status": f"Loaded {len(initial) // 2} turns from history.md"}
 
 
@@ -801,8 +807,11 @@ async def sse_chat_generator(chat_req: ChatRequest):
         ensure_files()
         client = get_client()
 
-        # Handle base64 image data
+        # Handle base64 image data: write to a temp file only; the single
+        # persistence (persist_and_compress_image) happens inside
+        # build_user_message below.
         saved_image_path = None
+        temp_image_path = None
         if chat_req.image_data and chat_req.image_data.startswith("data:image"):
             import tempfile
             from pathlib import Path
@@ -814,12 +823,14 @@ async def sse_chat_generator(chat_req: ChatRequest):
             
             temp_path = Path(tempfile.gettempdir()) / f"{uuid.uuid4()}.{ext}"
             temp_path.write_bytes(base64.b64decode(encoded))
-            saved_image_path = str(persist_and_compress_image(str(temp_path)))
-            temp_path.unlink(missing_ok=True)
+            saved_image_path = str(temp_path)
+            temp_image_path = str(temp_path)
 
         user_message, memory_user_text, user_plain_text, saved_image_path = build_user_message(
             chat_req.message, saved_image_path
         )
+        if temp_image_path:
+            Path(temp_image_path).unlink(missing_ok=True)
 
         context_messages = build_context_messages(user_message)
         use_web_search = bool(chat_req.web_search) and should_use_web_search(user_plain_text)
@@ -827,7 +838,6 @@ async def sse_chat_generator(chat_req: ChatRequest):
         extra_body = {"reasoning": {"enabled": bool(chat_req.thinking)}}
         if use_web_search:
             extra_body["plugins"] = [{"id": "web"}]
-            extra_body["web_search_options"] = {"search_context_size": "medium"}
 
         yield f"data: {json.dumps({'status': f'Thinking... (Web Search: {use_web_search})'})}\n\n"
 
@@ -858,20 +868,56 @@ async def sse_chat_generator(chat_req: ChatRequest):
         answer = "".join(answer_parts).strip() or "(No text response)"
         yield f"data: {json.dumps({'content': answer})}\n\n"
 
-        # Background processing
+        # Persist history and pending turn immediately (cheap file I/O) so the
+        # UI stays consistent, then close the stream right away. Network-bound
+        # work (compression + memory extraction) runs in a background thread so
+        # it never blocks the event loop or delays the SSE completion.
         append_turn_history(user_plain_text, answer, saved_image_path)
-        state = load_state()
-        state["pending_turns"].append({"user": memory_user_text, "assistant": answer})
-        maybe_compress_history(client, state)
-        save_state(state)
-        rewrite_history_compressed(state)
-        try:
-            extract_memory_with_function_call(client, user_plain_text, answer)
-        except Exception:
-            pass
+        with _STATE_LOCK:
+            state = load_state()
+            state["pending_turns"].append({"user": memory_user_text, "assistant": answer})
+            save_state(state)
+            rewrite_history_compressed(state)
 
         yield f"data: {json.dumps({'status': 'Ready.'})}\n\n"
         yield "data: [DONE]\n\n"
+
+        def _post_process() -> None:
+            # Summarize outside the lock (network I/O); commit under the lock
+            # (fast file I/O only) so the event loop is never held up.
+            try:
+                while True:
+                    with _STATE_LOCK:
+                        state = load_state()
+                        if len(state["pending_turns"]) < COMPRESS_EVERY_TURNS:
+                            break
+                        batch = state["pending_turns"][:COMPRESS_EVERY_TURNS]
+                        prior = state["compressed_memories"]
+
+                    try:
+                        summary_text = summarize_turns(client, batch, prior_summaries=prior)
+                    except Exception:
+                        break
+
+                    with _STATE_LOCK:
+                        state = load_state()
+                        if state["pending_turns"][:COMPRESS_EVERY_TURNS] == batch:
+                            state["compressed_memories"].append(
+                                {"id": len(state["compressed_memories"]) + 1, "summary": summary_text}
+                            )
+                            state["pending_turns"] = state["pending_turns"][COMPRESS_EVERY_TURNS:]
+                            save_state(state)
+                            rewrite_history_compressed(state)
+                        else:
+                            continue
+            except Exception:
+                pass
+            try:
+                extract_memory_with_function_call(client, user_plain_text, answer)
+            except Exception:
+                pass
+
+        threading.Thread(target=_post_process, daemon=True).start()
 
     except Exception as exc:
         if isinstance(exc, AuthenticationError) or "User not found" in str(exc):
@@ -884,9 +930,11 @@ async def sse_chat_generator(chat_req: ChatRequest):
 
 def build_server() -> FastAPI:
     validate_auth_config()
+    IMAGE_DIR.mkdir(parents=True, exist_ok=True)
     server = FastAPI(title="Virtual Life Auth Gateway")
 
     server.mount("/static", StaticFiles(directory="static"), name="static")
+    server.mount("/images", StaticFiles(directory=str(IMAGE_DIR)), name="images")
 
     @server.get("/", response_class=HTMLResponse)
     async def root(request: Request):

@@ -166,8 +166,7 @@ async function internalSendMessage(text, base64Image) {
         message: text,
         image_data: base64Image,
         thinking: thinkingCb.checked,
-        web_search: webSearchCb.checked,
-        chat_state: chatHistory.slice(0, -1) // Exclude the empty assistant placeholder we just pushed
+        web_search: webSearchCb.checked
     };
 
     try {
