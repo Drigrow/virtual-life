@@ -34,6 +34,9 @@ const imageInput = document.getElementById('image_input');
 const imagePreview = document.getElementById('image_preview');
 const clearImageBtn = document.getElementById('clear_image_btn');
 
+const modelSelect = document.getElementById('model_select');
+const modelLabel = document.getElementById('model_label');
+
 // Accordion elements
 const userProfile = document.getElementById('user_profile');
 const saveUserBtn = document.getElementById('save_user_btn');
@@ -49,6 +52,7 @@ const regenerateBtn = document.getElementById('regenerate_btn');
 let chatHistory = [];
 let isStreaming = false;
 let pendingBase64Image = null;
+let currentModel = null;
 
 function updateButtonStates() {
     const hasHistory = chatHistory.length > 0;
@@ -376,6 +380,49 @@ clearBtn.addEventListener('click', async () => {
     }
 });
 
+// Model selector (persisted server-side in model_state.json)
+async function loadModels() {
+    try {
+        const response = await fetch('/api/model');
+        if (response.status === 401) {
+            window.location.href = '/login';
+            return;
+        }
+        const data = await response.json();
+        currentModel = data.model;
+        modelSelect.innerHTML = '';
+        (data.choices || []).forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            modelSelect.appendChild(opt);
+        });
+        modelSelect.value = currentModel;
+        updateModelLabel(currentModel);
+    } catch (e) {
+        console.error('Failed to load models:', e);
+    }
+}
+
+function updateModelLabel(modelId) {
+    if (modelLabel) modelLabel.textContent = `Model: ${modelId}`;
+}
+
+modelSelect.addEventListener('change', async () => {
+    const m = modelSelect.value;
+    if (!m) return;
+    setStatus(`Switching model to ${m}...`);
+    const res = await apiCall('/api/model', { model: m });
+    if (res && res.ok) {
+        currentModel = res.model;
+        updateModelLabel(res.model);
+        setStatus(`Model switched to ${res.model}`);
+    } else {
+        setStatus((res && res.status) || 'Failed to switch model.');
+        modelSelect.value = currentModel || '';
+    }
+});
+
 // Initial load
 async function init() {
     try {
@@ -390,6 +437,7 @@ async function init() {
         renderChat();
         updateButtonStates();
         setStatus("Ready.");
+        loadModels();
     } catch (e) {
         setStatus("Failed to load initial state.");
     }

@@ -26,7 +26,29 @@ from PIL import Image
 
 load_dotenv()
 
-MODEL_NAME = "google/gemini-3.1-flash-lite-preview"
+# Switchable backend models (WebUI dropdown; selection persists in model_state.json)
+MODEL_CHOICES = [
+    "google/gemini-3.1-flash-lite-preview",
+    "google/gemini-3.5-flash-lite",
+    "google/gemini-3.7-flash",
+    "openai/gpt-5.6-luna",
+    "openai/gpt-oss-120b",
+    "x-ai/grok-4.20",
+]
+DEFAULT_MODEL = MODEL_CHOICES[0]
+
+# Per-model reasoning handling on OpenRouter:
+#   "off"     -> reasoning is optional; disable it (reasoning.enabled=false)
+#   "minimal" -> reasoning is mandatory; use minimal effort
+#   "low"     -> reasoning is mandatory; use the lowest supported effort
+MODEL_REASONING = {
+    "google/gemini-3.1-flash-lite-preview": "off",
+    "google/gemini-3.5-flash-lite": "minimal",
+    "google/gemini-3.7-flash": "low",
+    "openai/gpt-5.6-luna": "off",
+    "openai/gpt-oss-120b": "low",
+    "x-ai/grok-4.20": "off",
+}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 COMPRESS_EVERY_TURNS = 10
 MAX_UI_TURNS = 50  # How many recent turns /api/init returns to the browser
@@ -48,6 +70,7 @@ MEMORY_MD_PATH = Path("memory.md")
 USER_MD_PATH = Path("user.md")
 IMAGE_DIR = Path("chat_images")
 TRUSTED_DEVICES_PATH = Path("trusted_devices.json")
+MODEL_STATE_PATH = Path("model_state.json")
 _AUTH_LOCK = threading.Lock()
 _AUTH_STATE: dict[str, dict[str, float | int]] = {}
 _STATE_LOCK = threading.Lock()
@@ -280,6 +303,43 @@ def ensure_files() -> None:
 
     if not TRUSTED_DEVICES_PATH.exists():
         TRUSTED_DEVICES_PATH.write_text(json.dumps({"tokens": {}}, indent=2), encoding="utf-8")
+
+    if not MODEL_STATE_PATH.exists():
+        MODEL_STATE_PATH.write_text(json.dumps({"model": DEFAULT_MODEL}, indent=2), encoding="utf-8")
+
+
+def load_model_state() -> str:
+    ensure_files()
+    try:
+        data = json.loads(MODEL_STATE_PATH.read_text(encoding="utf-8"))
+        model = str(data.get("model", "") or "")
+        if model in MODEL_CHOICES:
+            return model
+    except (json.JSONDecodeError, OSError):
+        pass
+    return DEFAULT_MODEL
+
+
+def save_model_state(model_id: str) -> bool:
+    model_id = (model_id or "").strip()
+    if model_id not in MODEL_CHOICES:
+        return False
+    MODEL_STATE_PATH.write_text(json.dumps({"model": model_id}, indent=2), encoding="utf-8")
+    return True
+
+
+def get_current_model() -> str:
+    return load_model_state()
+
+
+def model_extra_body(model: str) -> dict:
+    """Reasoning params for a model: disable when optional, lowest effort when mandatory."""
+    reasoning = MODEL_REASONING.get(model)
+    if reasoning == "off":
+        return {"reasoning": {"enabled": False}}
+    if reasoning in ("minimal", "low"):
+        return {"reasoning_effort": reasoning}
+    return {}
 
 
 def load_state() -> dict:
@@ -531,9 +591,9 @@ def rolling_summarize(client: OpenAI, rolling_summary: str, batch: list[dict]) -
     )
 
     response = client.chat.completions.create(
-        model=MODEL_NAME,
+        model=get_current_model(),
         messages=[{"role": "user", "content": prompt}],
-        extra_body={"reasoning": {"enabled": False}},
+        extra_body=model_extra_body(get_current_model()),
     )
     msg = response.choices[0].message if response and response.choices else None
     content = (getattr(msg, "content", "") or "").strip() if msg else ""
@@ -584,9 +644,9 @@ def extract_facts_only(client: OpenAI, turns: list[dict]) -> list[str]:
     )
 
     response = client.chat.completions.create(
-        model=MODEL_NAME,
+        model=get_current_model(),
         messages=[{"role": "user", "content": prompt}],
-        extra_body={"reasoning": {"enabled": False}},
+        extra_body=model_extra_body(get_current_model()),
     )
     msg = response.choices[0].message if response and response.choices else None
     content = (getattr(msg, "content", "") or "").strip() if msg else ""
@@ -726,9 +786,9 @@ def merge_memory_with_model(client: OpenAI, new_facts: list[str]) -> bool:
         )
 
         response = client.chat.completions.create(
-            model=MODEL_NAME,
+            model=get_current_model(),
             messages=[{"role": "user", "content": prompt}],
-            extra_body={"reasoning": {"enabled": False}},
+            extra_body=model_extra_body(get_current_model()),
         )
         msg = response.choices[0].message if response and response.choices else None
         content = (getattr(msg, "content", "") or "").strip() if msg else ""
@@ -808,6 +868,9 @@ class ChatRequest(BaseModel):
     message: str
     image_data: str | None = None
 
+class ModelRequest(BaseModel):
+    model: str
+
 class SaveProfileRequest(BaseModel):
     content: str
 
@@ -852,15 +915,12 @@ async def sse_chat_generator(chat_req: ChatRequest):
 
         context_messages = build_context_messages(user_message)
 
-        # Reasoning (thinking) and web search are intentionally disabled: not
-        # needed for role-play, and OpenRouter's `plugins` web search is
-        # deprecated (use the `tools`-based web_search tool if ever needed).
-        extra_body = {"reasoning": {"enabled": False}}
+        extra_body = model_extra_body(get_current_model())
 
         yield f"data: {json.dumps({'status': 'Thinking...'})}\n\n"
 
         stream = client.chat.completions.create(
-            model=MODEL_NAME,
+            model=get_current_model(),
             messages=context_messages,
             extra_body=extra_body,
             stream=True,
@@ -1059,6 +1119,16 @@ def build_server() -> FastAPI:
         return resp
 
     # --- API Endpoints ---
+
+    @server.get("/api/model")
+    async def api_get_model():
+        return {"model": get_current_model(), "choices": MODEL_CHOICES}
+
+    @server.post("/api/model")
+    async def api_set_model(req: ModelRequest):
+        if not save_model_state(req.model):
+            return {"ok": False, "model": get_current_model(), "choices": MODEL_CHOICES, "status": f"Unknown model: {req.model}"}
+        return {"ok": True, "model": req.model, "choices": MODEL_CHOICES}
 
     @server.get("/api/init")
     async def api_init():

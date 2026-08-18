@@ -277,6 +277,18 @@ body {
   color: var(--fg);
 }
 
+#model_select {
+  width: 100%;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 8px;
+  border: 1px solid var(--input-border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--fg);
+  transition: background 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+}
+
 #image_preview {
   margin-top: 5px;
 }

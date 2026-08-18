@@ -19,6 +19,7 @@ history_state.json
 memory.md
 user.md
 trusted_devices.json
+model_state.json
 
 # Local tooling
 .gradio/

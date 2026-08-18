@@ -23,7 +23,7 @@
     <span id="theme_icon">🌙</span>
   </button>
   <div class="container">
-    <div id="title_md" class="title"># Virtual Life Chat<br><small>Model: google/gemini-3.1-flash-lite-preview</small></div>
+    <div id="title_md" class="title"># Virtual Life Chat<br><small id="model_label">Model: google/gemini-3.1-flash-lite-preview</small></div>
 
     <div class="desktop_shell">
       <!-- Left Panel -->
@@ -56,6 +56,11 @@
           <div id="image_preview"></div>
           <button id="clear_image_btn"
             style="display:none; width:100%; margin-top:5px; border-radius:4px; padding:4px;">Remove Image</button>
+        </div>
+
+        <div class="image_upload">
+          <label for="model_select">Model</label>
+          <select id="model_select"></select>
         </div>
 
         <div class="accordion">
