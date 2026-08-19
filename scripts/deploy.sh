@@ -17,7 +17,7 @@
 #   bash scripts/deploy.sh --no-restart   # 只装好/更新服务与 enable，不重启（供二次运行）
 #
 # 测试钩子（一般不用）：
-#   SYSTEMD_UNIT_DIRS=...   自定义单元目录（默认 /etc/systemd/system /usr/lib/systemd/system /lib/systemd/system）
+#   SYSTEMD_UNIT_DIR=...    自定义单元目录（默认 /etc/systemd/system；兼容旧的 SYSTEMD_UNIT_DIRS，取第一项）
 #   SKIP_ROOT_CHECK=1       跳过 root 检查
 #
 set -euo pipefail
@@ -25,7 +25,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
 SERVICE_BASE="virtual-life"
-UNIT_DIRS="${SYSTEMD_UNIT_DIRS:-/etc/systemd/system /usr/lib/systemd/system /lib/systemd/system}"
+# 单元目录：统一用单个目录（默认 /etc/systemd/system，admin 单元优先级最高）。
+# 搜索 / 防撞 / 写入全部用同一个 UNIT_DIR，避免“查得到却写不进去”的目录不一致。
+if [ -n "${SYSTEMD_UNIT_DIR:-}" ]; then
+  UNIT_DIR="$SYSTEMD_UNIT_DIR"
+else
+  UNIT_DIR=$(printf '%s\n' ${SYSTEMD_UNIT_DIRS:-/etc/systemd/system} | awk 'NF{print $1}')
+fi
 WITH_BACKUP=0
 RESTART=1
 PY=""
@@ -202,11 +208,8 @@ ensure_env() {
 }
 
 # ---------- systemd 服务（名字防撞） ----------
-unit_file() { # name -> path
-  local d
-  for d in $UNIT_DIRS; do
-    [ -f "$d/$1.service" ] && { echo "$d/$1.service"; return 0; }
-  done
+unit_file() { # name -> path（只在本目录内查找，与写入目录一致）
+  [ -f "$UNIT_DIR/$1.service" ] && { echo "$UNIT_DIR/$1.service"; return 0; }
   return 1
 }
 
@@ -225,8 +228,8 @@ pick_service_name() { # base -> name（幂等：已存在且指向本目录则�
 
 install_service() { # name -> unit_path
   local name="$1"
-  local dir; dir=$(printf '%s\n' $UNIT_DIRS | awk 'NF{print $1}')
-  local unit="$dir/$name.service"
+  mkdir -p "$UNIT_DIR"
+  local unit="$UNIT_DIR/$name.service"
   cat > "$unit" << EOF
 [Unit]
 Description=Virtual Life (roleplay chat with memory)
@@ -251,9 +254,8 @@ EOF
 # ---------- 主流程 ----------
 main() {
   if [ "${SKIP_ROOT_CHECK:-0}" != "1" ] && [ "$(id -u)" != 0 ]; then
-    local d; d=$(printf '%s\n' $UNIT_DIRS | awk 'NF{print $1}')
-    case "$d" in
-      /etc/systemd/*|/usr/lib/systemd/*|/lib/systemd/*) die "请用 root 运行（目标单元目录是系统目录 $d）" ;;
+    case "$UNIT_DIR" in
+      /etc/systemd/*|/usr/lib/systemd/*|/lib/systemd/*) die "请用 root 运行（目标单元目录是系统目录 $UNIT_DIR）" ;;
     esac
   fi
   command -v systemctl >/dev/null 2>&1 || die "未找到 systemctl（本机不是 systemd 环境？）"
