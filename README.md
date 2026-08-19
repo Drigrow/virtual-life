@@ -100,7 +100,9 @@ python main.py
 One-shot deploy on a server: detects Python 3.10+ (auto-installs via apt if missing),
 creates/reuses `.venv`, installs `requirements.txt`, and installs a systemd service
 whose name auto-dedupes (`virtual-life`, `virtual-life-2`, …) so it never clobbers an
-existing install, then `enable` + `start`:
+existing install, then `enable` + `start`. If `python -m venv` fails (e.g. Debian
+without `ensurepip`), it auto-downloads `uv` and uses `uv venv` + `uv pip install`
+instead:
 
 ```bash
 bash scripts/deploy.sh                 # deploy + start

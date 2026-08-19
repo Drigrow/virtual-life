@@ -63,38 +63,127 @@ ensure_python() {
 }
 
 # ---------- venv / 依赖 ----------
+uv_ready() {
+  command -v uv >/dev/null 2>&1 || [ -x /usr/local/bin/uv ] || [ -x "$APP_DIR/.uv/uv" ]
+}
+
+ensure_uv() {
+  # 已有 uv（PATH 或 /usr/local/bin）直接用；否则下载静态二进制
+  UV=""
+  if command -v uv >/dev/null 2>&1; then UV="$(command -v uv)"; return 0; fi
+  if [ -x /usr/local/bin/uv ]; then UV=/usr/local/bin/uv; return 0; fi
+
+  local arch os url tmp
+  case "$(uname -m)" in
+    x86_64|amd64) arch=x86_64 ;;
+    aarch64|arm64) arch=aarch64 ;;
+    *) say "!! 未知架构 $(uname -m)，无法下载 uv"; return 1 ;;
+  esac
+  case "$(uname -s)" in
+    Linux) os=unknown-linux-gnu ;;
+    Darwin) os=apple-darwin ;;
+    *) say "!! 未知系统 $(uname -s)，无法下载 uv"; return 1 ;;
+  esac
+  url="https://github.com/astral-sh/uv/releases/latest/download/uv-${arch}-${os}.tar.gz"
+  say "下载 uv（$url）..."
+  tmp=$(mktemp -d)
+  if ! curl -fsSL --max-time 120 "$url" -o "$tmp/uv.tar.gz" \
+     || ! tar -xzf "$tmp/uv.tar.gz" -C "$tmp" \
+     || [ ! -f "$tmp/uv-${arch}-${os}/uv" ]; then
+    rm -rf "$tmp"
+    say "!! 下载 uv 失败（需要外网访问 github.com）"
+    return 1
+  fi
+  if [ -w /usr/local/bin ]; then
+    cp "$tmp/uv-${arch}-${os}/uv" /usr/local/bin/uv
+    chmod +x /usr/local/bin/uv
+    UV=/usr/local/bin/uv
+  else
+    mkdir -p "$APP_DIR/.uv"
+    cp "$tmp/uv-${arch}-${os}/uv" "$APP_DIR/.uv/uv"
+    chmod +x "$APP_DIR/.uv/uv"
+    UV="$APP_DIR/.uv/uv"
+  fi
+  rm -rf "$tmp"
+  say "uv 就绪: $UV"
+}
+
 create_venv() {
   rm -rf "$VENV"
   say "创建 $VENV（$PY）..."
-  if ! "$PY" -m venv "$VENV"; then
-    # ensurepip 缺失（Debian/Ubuntu 常见）→ 装对应 python3.X-venv 后重试
-    rm -rf "$VENV"
-    say "venv 创建失败（通常缺 ensurepip），尝试安装 ${PY}-venv / python3-venv..."
-    if command -v apt-get >/dev/null 2>&1; then
-      apt-get update -qq 2>/dev/null || true
-      apt-get install -y "${PY}-venv" \
-        || apt-get install -y python3-venv \
-        || die "无法安装 venv 支持包（${PY}-venv / python3-venv）；请手动: apt install ${PY}-venv"
-    else
-      die "无法自动安装 venv 支持包；请手动: apt install ${PY}-venv（或 python3-venv）"
-    fi
-    "$PY" -m venv "$VENV" || die "再次创建 venv 失败；请手动: $PY -m venv $VENV"
+  if "$PY" -m venv "$VENV" 2>/dev/null; then
+    return 0
   fi
+
+  # 第 1 级兜底：下载 uv（静态二进制，自带 venv/pip，完全绕开 ensurepip）
+  rm -rf "$VENV"
+  say "python -m venv 失败（通常缺 ensurepip）。下载 uv 创建环境..."
+  if ensure_uv; then
+    if ! "$UV" venv "$VENV" --python "$PY"; then
+      rm -rf "$VENV"
+      die "uv venv 失败；请手动检查 $PY"
+    fi
+    say "venv 已由 uv 创建"
+    return 0
+  fi
+
+  # 第 2 级兜底：apt 安装 python3.X-venv 后重试
+  # （python3.13-venv 在 Debian 13 上存在；装不上多半是 apt 索引过期，先 apt-get update）
+  say "尝试安装 ${PY}-venv / python3-venv 后用 python -m venv 重试..."
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update -qq || true
+    apt-get install -y "${PY}-venv" 2>/dev/null \
+      || apt-get install -y python3-venv 2>/dev/null \
+      || say "!! apt 装不上 ${PY}-venv / python3-venv（索引可能过期，先手动跑 apt-get update）"
+  else
+    say "无 apt-get，跳过装包"
+  fi
+  if "$PY" -m venv "$VENV" 2>/dev/null; then
+    say "venv 创建成功（安装 venv 支持包后）"
+    return 0
+  fi
+
+  # 第 3 级兜底：--without-pip + get-pip.py（Debian stripped python 的经典解法）
+  rm -rf "$VENV"
+  say "仍失败，改用 --without-pip + get-pip.py 引导 pip..."
+  "$PY" -m venv --without-pip "$VENV" || die "连 --without-pip 都失败；请手动检查 $PY 是否正常"
+  local gpfile
+  gpfile="/tmp/vl-get-pip-$$.py"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 120 https://bootstrap.pypa.io/get-pip.py -o "$gpfile" || die "下载 get-pip.py 失败（需要外网）"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$gpfile" --timeout=120 https://bootstrap.pypa.io/get-pip.py || die "下载 get-pip.py 失败（需要外网）"
+  else
+    die "没有 curl/wget，无法引导 pip；请手动: apt-get update && apt install ${PY}-venv"
+  fi
+  "$VENV/bin/python" "$gpfile" || die "pip 引导失败（请检查外网/PyPI 连通性）"
+  rm -f "$gpfile"
+  say "pip 已通过 get-pip.py 引导"
 }
 
 ensure_venv() {
-  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/pip" ]; then
+  if [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/python" ]; then
     VENV="$VIRTUAL_ENV"
     say "使用已激活的 venv: $VENV"
   else
     VENV="$APP_DIR/.venv"
-    # 以 bin/pip 是否可用判断 venv 是否完整；半成品（有 python 无 pip）也重建
-    if [ ! -x "$VENV/bin/pip" ]; then
+    # venv 完整 = bin/python 可执行，且（有 pip 或有 uv 可代替 pip）
+    # 半成品（有 python 无 pip、又无 uv）也重建
+    if [ ! -x "$VENV/bin/python" ] || { [ ! -x "$VENV/bin/pip" ] && ! uv_ready; }; then
       create_venv
     fi
   fi
-  say "安装依赖（requirements.txt）..."
-  "$VENV/bin/pip" install -r "$APP_DIR/requirements.txt"
+  install_deps
+}
+
+install_deps() {
+  if [ -n "${UV:-}" ] && [ -x "$UV" ]; then
+    say "安装依赖（uv，requirements.txt）..."
+    "$UV" pip install --python "$VENV/bin/python" -r "$APP_DIR/requirements.txt"
+  else
+    say "安装依赖（pip，requirements.txt）..."
+    "$VENV/bin/pip" install -r "$APP_DIR/requirements.txt"
+  fi
 }
 
 # ---------- .env ----------
