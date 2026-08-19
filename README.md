@@ -95,6 +95,31 @@ python main.py
 
 ---
 
+## Server deploy & backup (`scripts/`)
+
+One-shot deploy on a server: detects Python 3.10+ (auto-installs via apt if missing),
+creates/reuses `.venv`, installs `requirements.txt`, and installs a systemd service
+whose name auto-dedupes (`virtual-life`, `virtual-life-2`, …) so it never clobbers an
+existing install, then `enable` + `start`:
+
+```bash
+bash scripts/deploy.sh                 # deploy + start
+bash scripts/deploy.sh --with-backup   # also configure local backup afterwards
+```
+
+Backup setup (default: copy runtime data to the sibling `<app>-data/` folder; optional
+remote git repo; re-running `setup` changes the choice):
+
+```bash
+bash scripts/backup.sh setup                                # interactive (default local)
+bash scripts/backup.sh setup --mode both --remote <URL>     # local + weekly remote push
+bash scripts/backup.sh run | status | off
+```
+
+Backed up: `*.md`, `*.json`, `chat_images/` (never `.env`).
+
+---
+
 ## Configuration (`.env`)
 
 | Variable | Required | Default | Description |
