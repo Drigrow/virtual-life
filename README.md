@@ -105,9 +105,13 @@ without `ensurepip`), it auto-downloads `uv` and uses `uv venv` + `uv pip instal
 instead:
 
 ```bash
-bash scripts/deploy.sh                 # deploy + start
-bash scripts/deploy.sh --with-backup   # also configure local backup afterwards
+bash scripts/install.sh                 # 交互式安装：配置 .env + 部署 + 可选本地备份
+bash scripts/deploy.sh                  # deploy + start（非交互）
+bash scripts/deploy.sh --with-backup    # also configure local backup afterwards
+bash scripts/uninstall.sh               # 卸载：停/删服务、备份、venv（逐项确认；--yes 全删）
 ```
+
+`install.sh` / `deploy.sh` 会在终端里**交互提示填写 `.env`**（OpenRouter API key、登录用户名/密码；回车保留当前值），非交互环境自动跳过提示并在缺项（含模板占位符）时告警。
 
 Backup setup (default: copy runtime data to the sibling `<app>-data/` folder; optional
 remote git repo; re-running `setup` changes the choice):

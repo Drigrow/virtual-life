@@ -201,18 +201,56 @@ install_deps() {
 }
 
 # ---------- .env ----------
+env_val() { # key -> value（去引号/空白）
+  awk -F= -v k="$1" 'index($0,k"=")==1{sub(/^[^=]*=/,"");print}' "$APP_DIR/.env" | tail -1 | tr -d '" '
+}
+
+set_env_key() { # key label [expected_prefix]——TTY 下提示填写，回车保留当前值
+  local key="$1" label="$2" prefix="${3:-}"
+  local cur val
+  cur=$(env_val "$key")
+  [ -t 0 ] || return 0
+  local prompt="$label"
+  [ -n "$cur" ] && prompt="$prompt（当前: ${cur:0:6}…，回车保留）"
+  read -r -p "$prompt: " val || true
+  val=$(printf '%s' "$val" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+  [ -n "$val" ] || return 0
+  if [ -n "$prefix" ] && ! printf '%s' "$val" | grep -q "^${prefix}"; then
+    say "!! $label 一般应以 ${prefix} 开头，已照写，请确认"
+  fi
+  awk -v k="$key" -v v="$val" '
+    index($0,k"=")==1 { print k "=" v; found=1; next }
+    { print }
+    END { if (!found) print k "=" v }
+  ' "$APP_DIR/.env" > "$APP_DIR/.env.tmp" && mv "$APP_DIR/.env.tmp" "$APP_DIR/.env"
+}
+
 ensure_env() {
   if [ ! -f "$APP_DIR/.env" ]; then
     if [ -f "$APP_DIR/.env.example" ]; then
       cp "$APP_DIR/.env.example" "$APP_DIR/.env"
-      say "!! 已从 .env.example 生成 .env，请填入 OPENROUTER_API_KEY / APP_AUTH_USERNAME / APP_AUTH_PASSWORD 后重启服务"
     else
-      say "!! 缺少 .env（需要 OPENROUTER_API_KEY / APP_AUTH_USERNAME / APP_AUTH_PASSWORD）"
+      : > "$APP_DIR/.env"
     fi
-  else
-    grep -q '^OPENROUTER_API_KEY=.\+' "$APP_DIR/.env" \
-      || say "!! 警告: .env 里 OPENROUTER_API_KEY 为空"
+    say "!! 未发现 .env，已创建。"
   fi
+  if [ -t 0 ]; then
+    say "== 配置 .env（直接回车=保留当前值） =="
+    set_env_key OPENROUTER_API_KEY "OpenRouter API Key" "sk-or-"
+    set_env_key APP_AUTH_USERNAME "登录用户名"
+    set_env_key APP_AUTH_PASSWORD "登录密码"
+  fi
+  chmod 600 "$APP_DIR/.env"
+  # 校验：空值或模板占位符都视为未配置
+  local k u p
+  k=$(env_val OPENROUTER_API_KEY)
+  [ -n "$k" ] && [ "$k" != "your_openrouter_api_key_here" ] \
+    || say "!! .env 的 OPENROUTER_API_KEY 未配置（服务将无法调用模型）"
+  u=$(env_val APP_AUTH_USERNAME)
+  [ -n "$u" ] || say "!! .env 的 APP_AUTH_USERNAME 未配置"
+  p=$(env_val APP_AUTH_PASSWORD)
+  [ -n "$p" ] && [ "$p" != "change_this_to_a_strong_password" ] \
+    || say "!! .env 的 APP_AUTH_PASSWORD 未配置（仍为模板默认值）"
 }
 
 # ---------- systemd 服务（名字防撞） ----------
