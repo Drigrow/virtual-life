@@ -74,10 +74,11 @@ uv_ready() {
 }
 
 ensure_uv() {
-  # 已有 uv（PATH 或 /usr/local/bin）直接用；否则下载静态二进制
+  # 已有 uv（PATH / /usr/local/bin / $APP_DIR/.uv/uv）直接用；否则下载静态二进制
   UV=""
   if command -v uv >/dev/null 2>&1; then UV="$(command -v uv)"; return 0; fi
   if [ -x /usr/local/bin/uv ]; then UV=/usr/local/bin/uv; return 0; fi
+  if [ -x "$APP_DIR/.uv/uv" ]; then UV="$APP_DIR/.uv/uv"; return 0; fi
 
   local arch os url tmp
   case "$(uname -m)" in
@@ -179,16 +180,23 @@ ensure_venv() {
       create_venv
     fi
   fi
+  # uv 建的 venv 没有 pip：此时必须解析出 UV（已装则复用，没装则下载），
+  # 否则 install_deps 会走 pip 分支报 no such file
+  if [ ! -x "$VENV/bin/pip" ] && [ -z "${UV:-}" ]; then
+    ensure_uv || die "venv 缺少 pip 且无法获取 uv；请手动: rm -rf .venv && apt-get update && apt install ${PY}-venv，然后重跑"
+  fi
   install_deps
 }
 
 install_deps() {
-  if [ -n "${UV:-}" ] && [ -x "$UV" ]; then
+  if [ -x "$VENV/bin/pip" ]; then
+    say "安装依赖（pip，requirements.txt）..."
+    "$VENV/bin/pip" install -r "$APP_DIR/requirements.txt"
+  elif [ -n "${UV:-}" ] && [ -x "$UV" ]; then
     say "安装依赖（uv，requirements.txt）..."
     "$UV" pip install --python "$VENV/bin/python" -r "$APP_DIR/requirements.txt"
   else
-    say "安装依赖（pip，requirements.txt）..."
-    "$VENV/bin/pip" install -r "$APP_DIR/requirements.txt"
+    die "既没有 venv 内 pip，也没有 uv；无法安装依赖"
   fi
 }
 
