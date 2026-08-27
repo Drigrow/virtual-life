@@ -51,6 +51,7 @@ MODEL_REASONING = {
 }
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 COMPRESS_EVERY_TURNS = 10
+KEEP_RECENT_TURNS = 2  # Keep recent dialogue turns in active context even after rolling compression
 MAX_UI_TURNS = 50  # How many recent turns /api/init returns to the browser
 COMPRESS_SIZE_THRESHOLD = 3000  # Rolling-compress pending text when it reaches ~3000 chars
 MAX_SUMMARY_CHARS = 8000  # Safety cap for a single rolling summary
@@ -558,6 +559,44 @@ def _strip_json_fences(text: str) -> str:
     return cleaned.strip()
 
 
+def _extract_json_object(text: str) -> dict | None:
+    cleaned = _strip_json_fences(text)
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def _extract_json_array(text: str) -> list | None:
+    cleaned = _strip_json_fences(text)
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            if isinstance(data, list):
+                return data
+        except Exception:
+            pass
+    return None
+
+
 def rolling_summarize(client: OpenAI, rolling_summary: str, batch: list[dict]) -> dict:
     """Merge (old rolling summary + new batch) into one updated summary + new facts."""
     turns_text = []
@@ -600,17 +639,14 @@ def rolling_summarize(client: OpenAI, rolling_summary: str, batch: list[dict]) -
 
     summary = ""
     facts: list[str] = []
-    try:
-        data = json.loads(_strip_json_fences(content))
-        if not isinstance(data, dict):
-            raise ValueError("not an object")
+    data = _extract_json_object(content)
+    if data is not None:
         raw_summary = str(data.get("summary", "") or "").strip()
         raw_facts = data.get("facts", [])
         if isinstance(raw_facts, list):
             facts = [str(f).strip() for f in raw_facts if str(f).strip()]
         summary = raw_summary or content
-    except Exception:
-        # Degrade gracefully: keep raw response as summary, no facts.
+    else:
         summary = content
         facts = []
 
@@ -651,12 +687,9 @@ def extract_facts_only(client: OpenAI, turns: list[dict]) -> list[str]:
     msg = response.choices[0].message if response and response.choices else None
     content = (getattr(msg, "content", "") or "").strip() if msg else ""
 
-    try:
-        data = json.loads(_strip_json_fences(content))
-        if isinstance(data, list):
-            return [str(f).strip() for f in data if str(f).strip()]
-    except Exception:
-        pass
+    data = _extract_json_array(content)
+    if isinstance(data, list):
+        return [str(f).strip() for f in data if str(f).strip()]
     return []
 
 
@@ -699,7 +732,7 @@ def rewrite_history_compressed(state: dict) -> None:
 
 
 def manual_compress() -> dict:
-    """Force one rolling compression of all pending turns regardless of threshold."""
+    """Force one rolling compression of pending turns."""
     try:
         ensure_files()
         with _STATE_LOCK:
@@ -709,15 +742,20 @@ def manual_compress() -> dict:
         if not pending:
             return {"status": "Nothing to compress — no pending turns."}
 
+        batch = pending[:-KEEP_RECENT_TURNS] if len(pending) > KEEP_RECENT_TURNS else pending
+        if not batch:
+            batch = pending
+
         client = get_client()
-        result = rolling_summarize(client, rolling_summary, pending)
+        result = rolling_summarize(client, rolling_summary, batch)
 
         with _STATE_LOCK:
             state = load_state()
-            if state.get("pending_turns", []) == pending:
+            current_pending = state.get("pending_turns", []) or []
+            if len(current_pending) >= len(batch) and current_pending[:len(batch)] == batch:
                 state["rolling_summary"] = result.get("summary", "")
-                state["pending_turns"] = []
-                state["facts_watermark"] = 0
+                state["pending_turns"] = current_pending[len(batch):]
+                state["facts_watermark"] = max(0, int(state.get("facts_watermark", 0)) - len(batch))
                 save_state(state)
                 rewrite_history_compressed(state)
             else:
@@ -805,6 +843,9 @@ def merge_memory_with_model(client: OpenAI, new_facts: list[str]) -> bool:
         if len(cleaned) > MEMORY_SIZE_BUDGET:
             marker = "## 近期临时"
             idx = cleaned.find(marker)
+            if idx < 0:
+                marker = "## Temporary"
+                idx = cleaned.find(marker)
             if idx > 0:
                 cleaned = cleaned[:idx].rstrip() + "\n"
                 print("[memory] memory.md exceeded budget; pruned the temporary section.", file=sys.stderr)
@@ -819,46 +860,44 @@ def merge_memory_with_model(client: OpenAI, new_facts: list[str]) -> bool:
 
 
 def build_context_messages(user_message: dict) -> list[dict]:
-    compressed_text = HISTORY_COMPRESSED_MD_PATH.read_text(encoding="utf-8").strip()
-    memory_text = MEMORY_MD_PATH.read_text(encoding="utf-8").strip()
+    ensure_files()
+    state = load_state()
     user_text = USER_MD_PATH.read_text(encoding="utf-8").strip()
+    memory_text = MEMORY_MD_PATH.read_text(encoding="utf-8").strip()
+    rolling_summary = str(state.get("rolling_summary", "") or "").strip()
+    pending_turns = state.get("pending_turns", []) or []
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a helpful assistant for role-play platform use. Keep responses consistent "
-                "with history and memory files. Treat `user.md` as persistent 'who you are' notes "
-                "about the user identity/persona, and prioritize alignment with it unless the user "
-                "explicitly asks to change it."
-            ),
-        },
-        {
-            "role": "system",
-            "content": (
-                "Use this recent conversation context file — a rolling summary of older "
-                "conversation plus recent turns (short/medium-term memory):\n\n"
-                f"{compressed_text}"
-            ),
-        },
-        {
-            "role": "system",
-            "content": (
-                "Use this long-term memory file — durable facts about the user (preferences, "
-                "health, goals, identity). Treat it as authoritative long-term memory and prefer "
-                f"it over the rolling summary when they conflict:\n\n{memory_text}"
-            ),
-        },
-        {
-            "role": "system",
-            "content": (
-                "Use this user profile file as the highest-priority identity memory (who the "
-                "user is, role-play persona, preferences, and constraints); it overrides "
-                f"conflicts in the other files:\n\n{user_text}"
-            ),
-        },
-        user_message,
+    system_sections = [
+        "You are an immersive, attentive, and consistent AI companion for role-play and long-term conversation.",
+        "Strictly adhere to the user's profile, tone, persona, and established relationship history. Always stay in character and maintain seamless conversational continuity without breaking immersion or giving generic default responses.",
     ]
+
+    if user_text:
+        system_sections.append(f"### [USER PROFILE & IDENTITY (HIGHEST PRIORITY)]\n{user_text}")
+
+    if memory_text:
+        system_sections.append(f"### [LONG-TERM MEMORY & DURABLE FACTS]\n{memory_text}")
+
+    if rolling_summary:
+        system_sections.append(f"### [PRIOR CONVERSATION SUMMARY (BACKGROUND CONTEXT)]\n{rolling_summary}")
+
+    system_prompt = "\n\n".join(system_sections)
+
+    messages = [{"role": "system", "content": system_prompt}]
+
+    # Append recent active turns as true conversational turns
+    for turn in pending_turns:
+        if not isinstance(turn, dict):
+            continue
+        u_text = str(turn.get("user", "") or "").strip()
+        a_text = str(turn.get("assistant", "") or "").strip()
+        if u_text:
+            messages.append({"role": "user", "content": u_text})
+        if a_text:
+            messages.append({"role": "assistant", "content": a_text})
+
+    # Append current user message
+    messages.append(user_message)
     return messages
 
 
@@ -979,7 +1018,10 @@ async def sse_chat_generator(chat_req: ChatRequest):
                             or estimate_text_size(joined) >= COMPRESS_SIZE_THRESHOLD
                         )
                         if should_compress:
-                            batch = pending
+                            if len(pending) > KEEP_RECENT_TURNS:
+                                batch = pending[:-KEEP_RECENT_TURNS]
+                            else:
+                                batch = pending
                             rolling_summary = str(state.get("rolling_summary", "") or "")
                             eager_tail = []
                         else:
@@ -995,10 +1037,11 @@ async def sse_chat_generator(chat_req: ChatRequest):
 
                         with _STATE_LOCK:
                             state = load_state()
-                            if state.get("pending_turns", []) == batch:
+                            current_pending = state.get("pending_turns", []) or []
+                            if len(current_pending) >= len(batch) and current_pending[:len(batch)] == batch:
                                 state["rolling_summary"] = result.get("summary", "")
-                                state["pending_turns"] = []
-                                state["facts_watermark"] = 0
+                                state["pending_turns"] = current_pending[len(batch):]
+                                state["facts_watermark"] = max(0, int(state.get("facts_watermark", 0)) - len(batch))
                                 save_state(state)
                                 rewrite_history_compressed(state)
                             else:
@@ -1158,33 +1201,47 @@ def build_server() -> FastAPI:
     @server.post("/api/pop_last_turn", response_model=PopTurnResponse)
     async def api_pop_last_turn():
         ensure_files()
-        state = load_state()
-        if not state.get("pending_turns"):
-            return PopTurnResponse(success=False, error="Cannot edit. The last turn is already compressed into long-term memory.")
-        
         text = HISTORY_MD_PATH.read_text(encoding="utf-8")
         matches = list(TURN_PATTERN.finditer(text))
         if not matches:
-            return PopTurnResponse(success=False, error="Could not parse history.md to pop turn.")
-            
+            matches = list(LEGACY_TURN_PATTERN.finditer(text))
+            if not matches:
+                return PopTurnResponse(success=False, error="No chat history to edit.")
+
         last_match = matches[-1]
         text_before = text[:last_match.start()]
         HISTORY_MD_PATH.write_text(text_before, encoding="utf-8")
-        
-        state["pending_turns"].pop()
-        save_state(state)
-        rewrite_history_compressed(state)
-        
-        user_plain = last_match.group("user").strip()
-        image_path = last_match.group("image").strip()
-        
+
+        with _STATE_LOCK:
+            state = load_state()
+            if state.get("pending_turns"):
+                state["pending_turns"].pop()
+            else:
+                remaining_matches = list(TURN_PATTERN.finditer(text_before)) or list(LEGACY_TURN_PATTERN.finditer(text_before))
+                if remaining_matches:
+                    tail = remaining_matches[-KEEP_RECENT_TURNS:]
+                    state["pending_turns"] = [
+                        {"user": m.group("user").strip(), "assistant": m.group("assistant").strip()}
+                        for m in tail
+                    ]
+                else:
+                    state["pending_turns"] = []
+                    state["rolling_summary"] = ""
+
+            state["facts_watermark"] = min(int(state.get("facts_watermark", 0)), len(state.get("pending_turns", [])))
+            save_state(state)
+            rewrite_history_compressed(state)
+
+        user_plain = last_match.group("user").strip() if "user" in last_match.groupdict() else ""
+        image_path = last_match.group("image").strip() if "image" in last_match.groupdict() else ""
+
         image_data = None
         if image_path:
             img_file = Path(image_path)
             if img_file.exists():
                 image_data = file_to_data_url(img_file)
                 img_file.unlink(missing_ok=True)
-                
+
         return PopTurnResponse(success=True, user_text=user_plain, image_data=image_data)
 
     @server.post("/api/chat")

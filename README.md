@@ -20,7 +20,7 @@ Most AI chats are stateless — every session starts fresh. Virtual Life is diff
 
 | Feature | Details |
 |---|---|
-| 💬 Chat UI | Gradio-based, supports text + image upload |
+| 💬 Chat UI | Modern responsive Web UI, supports text + image upload |
 | 🖼️ Image support | Upload images; stored locally with JPEG compression |
 | 🧠 Long-term memory | Turns auto-compress every 10 chats; prior context informs each new compression |
 | ✍️ Manual Compress | Force-compress pending turns at any time |
@@ -29,7 +29,7 @@ Most AI chats are stateless — every session starts fresh. Virtual Life is diff
 | 💡 Thinking mode | Toggle extended reasoning on/off |
 | 👤 User profile | Editable `user.md` — persistent identity/persona for the AI |
 | 🔒 Auth gateway | Login-protected with trusted device cookies and brute-force lockout |
-| 🌐 i18n | English and Simplified Chinese UI |
+| 🌐 Multi-language | English and multilingual conversation support |
 
 ---
 
@@ -105,13 +105,14 @@ without `ensurepip`), it auto-downloads `uv` and uses `uv venv` + `uv pip instal
 instead:
 
 ```bash
-bash scripts/install.sh                 # 交互式安装：配置 .env + 部署 + 可选本地备份
-bash scripts/deploy.sh                  # deploy + start（非交互）
+bash scripts/install.sh                 # Interactive setup: configure .env + deploy + optional local backup
+bash scripts/deploy.sh                  # deploy + start (non-interactive)
 bash scripts/deploy.sh --with-backup    # also configure local backup afterwards
-bash scripts/uninstall.sh               # 卸载：停/删服务、备份、venv（逐项确认；--yes 全删）
+bash scripts/update.sh                  # Safe one-click update: archives data -> git pull -> pip install -> restarts service
+bash scripts/uninstall.sh               # uninstall: stop/remove service, backup, venv (per-item confirmation; --yes removes all)
 ```
 
-`install.sh` / `deploy.sh` 会在终端里**交互提示填写 `.env`**（OpenRouter API key、登录用户名/密码；回车保留当前值），非交互环境自动跳过提示并在缺项（含模板占位符）时告警。
+`install.sh` / `deploy.sh` will interactively prompt in the terminal to configure `.env` (OpenRouter API key, login username/password; pressing Enter keeps current values). Non-interactive environments automatically skip prompts and warn if required values (including template placeholders) are missing.
 
 Backup setup (default: copy runtime data to the sibling `<app>-data/` folder; optional
 remote git repo; re-running `setup` changes the choice):
