@@ -31,7 +31,7 @@ const I18N_DICT = {
         lang_title: "Switch English / 中文",
         app_title: "# Virtual Life Chat",
         model_prefix: "Model: ",
-        message_placeholder: "Type your message... (Click Send to send)",
+        message_placeholder: "Type your message and press Enter (Shift+Enter for newline)",
         send_btn: "Send",
         edit_last_btn: "📝 Edit Last",
         regenerate_btn: "🔄 Regenerate",
@@ -62,7 +62,7 @@ const I18N_DICT = {
         lang_title: "切换语言 (English / 中文)",
         app_title: "# 虚拟人生 Virtual Life",
         model_prefix: "模型: ",
-        message_placeholder: "输入消息...（点击发送按钮发送）",
+        message_placeholder: "输入消息并按 Enter 发送（Shift+Enter 换行）",
         send_btn: "发送",
         edit_last_btn: "📝 编辑上一条",
         regenerate_btn: "🔄 重新生成",
@@ -427,8 +427,34 @@ async function sendMessage() {
 
 // Events
 sendBtn.addEventListener('click', sendMessage);
-// Note: Bare Enter key listener is completely removed. Pressing Enter will only insert a newline.
-// Messages can only be sent by explicitly clicking the Send button (or Resend in Retained Prompt).
+
+// IME Composition Guard (Fixes macOS Chinese IME English confirmation sending prematurely)
+let isComposing = false;
+let lastCompositionEndTime = 0;
+
+messageInput.addEventListener('compositionstart', () => {
+    isComposing = true;
+});
+
+messageInput.addEventListener('compositionend', () => {
+    isComposing = false;
+    lastCompositionEndTime = performance.now();
+});
+
+messageInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+        // Guard 1: In active IME composition or keyCode 229
+        if (isComposing || e.isComposing || e.keyCode === 229) {
+            return;
+        }
+        // Guard 2: macOS IME Enter confirmation fired compositionend within 100ms
+        if (performance.now() - lastCompositionEndTime < 100) {
+            return;
+        }
+        e.preventDefault();
+        sendMessage();
+    }
+});
 
 // Retained Prompt actions
 if (retainedPromptText) {
