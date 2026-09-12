@@ -5,7 +5,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Virtual Life</title>
-  <link rel="stylesheet" href="/static/style.css?v=2" />
+  <link rel="stylesheet" href="/static/style.css?v=3" />
   <!-- Apply saved/system theme before first paint to avoid flash -->
   <script>
     (function () {
@@ -67,8 +67,8 @@
         </div>
 
         <div class="accordion">
-          <button class="accordion-header active" id="retained_prompt_header">Retained Prompt</button>
-          <div class="accordion-content show" id="retained_prompt_content">
+          <button class="accordion-header" id="retained_prompt_header">Retained Prompt</button>
+          <div class="accordion-content" id="retained_prompt_content">
             <textarea id="retained_prompt_text" rows="3" placeholder="Last sent prompt will be kept here..."></textarea>
             <div style="display:flex; gap:8px; margin-top:8px;">
               <button id="resend_retained_btn" class="primary-btn" style="flex:1; padding:8px; font-size:13px;">Resend</button>
@@ -116,7 +116,7 @@
     </div>
   </div>
 
-  <script src="/static/main.js?v=2"></script>
+  <script src="/static/main.js?v=3"></script>
 </body>
 
 </html>
