@@ -442,6 +442,39 @@ body {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
 }
 
+/* Language Toggle Button */
+#lang_toggle {
+  position: fixed;
+  top: 14px;
+  right: 64px;
+  z-index: 1000;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--toggle-bg);
+  color: var(--toggle-fg);
+  font-size: 18px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+  line-height: 1;
+}
+
+#lang_toggle:hover {
+  background: var(--toggle-hover);
+  transform: scale(1.08);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+}
+
+#clear_retained_btn:hover {
+  color: var(--fg) !important;
+  text-decoration: underline;
+}
+
 @media (max-width: 900px) {
   .desktop_shell {
     flex-direction: column;

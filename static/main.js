@@ -23,6 +23,141 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e)
         applyTheme(e.matches ? 'dark' : 'light');
     }
 });
+
+// ── i18n ───────────────────────────────────────────────────────────────────────
+const I18N_DICT = {
+    en: {
+        theme_title: "Toggle dark / light mode",
+        lang_title: "Switch English / 中文",
+        app_title: "# Virtual Life Chat",
+        model_prefix: "Model: ",
+        message_placeholder: "Type your message... (Click Send or Cmd/Ctrl+Enter to send)",
+        send_btn: "Send",
+        edit_last_btn: "📝 Edit Last",
+        regenerate_btn: "🔄 Regenerate",
+        status_ready: "Ready.",
+        upload_label: "Upload Image (optional)",
+        remove_image_btn: "Remove Image",
+        model_select_label: "Model",
+        retained_prompt_header: "Retained Prompt",
+        retained_prompt_placeholder: "Last sent prompt will be kept here...",
+        resend_btn: "Resend",
+        fill_input_btn: "Fill Input",
+        clear_btn: "Clear",
+        user_profile_header: "User Profile & Context",
+        save_profile_btn: "Save Profile",
+        memory_management_header: "Memory Management",
+        manual_compress_btn: "Manual Compress",
+        memory_warning: "Warning: Consolidating memory.md irreversibly rewrites the memory file.",
+        consolidate_confirm_placeholder: "Type COMPRESS",
+        consolidate_btn: "Consolidate Memory",
+        danger_zone_header: "Danger Zone",
+        danger_warning: "WARNING: This action permanently deletes ALL history, memory, and uploaded images.",
+        clear_history_confirm_placeholder: "Type CLEAR ALL HISTORY",
+        clear_history_btn: "Clear All History",
+        logout_link: "Logout",
+    },
+    zh: {
+        theme_title: "切换深色 / 浅色模式",
+        lang_title: "切换语言 (English / 中文)",
+        app_title: "# 虚拟人生 Virtual Life",
+        model_prefix: "模型: ",
+        message_placeholder: "输入消息...（点击发送或 Cmd/Ctrl+Enter 发送）",
+        send_btn: "发送",
+        edit_last_btn: "📝 编辑上一条",
+        regenerate_btn: "🔄 重新生成",
+        status_ready: "就绪。",
+        upload_label: "上传图片（可选）",
+        remove_image_btn: "移除图片",
+        model_select_label: "模型选择",
+        retained_prompt_header: "保留提示词",
+        retained_prompt_placeholder: "上一次发送的文本将保留在此...",
+        resend_btn: "重新发送",
+        fill_input_btn: "填入输入框",
+        clear_btn: "清空",
+        user_profile_header: "用户设定与画像",
+        save_profile_btn: "保存设定",
+        memory_management_header: "记忆管理",
+        manual_compress_btn: "手动压缩",
+        memory_warning: "警告：整理 memory.md 将永久重写记忆文件。",
+        consolidate_confirm_placeholder: "输入 COMPRESS",
+        consolidate_btn: "合并整理记忆",
+        danger_zone_header: "危险区域",
+        danger_warning: "警告：此操作将永久删除所有对话历史、记忆和上传的图片。",
+        clear_history_confirm_placeholder: "输入 CLEAR ALL HISTORY",
+        clear_history_btn: "清空所有历史",
+        logout_link: "退出登录",
+    }
+};
+
+let currentLang = localStorage.getItem('vl_lang') || ((navigator.language && navigator.language.startsWith('zh')) ? 'zh' : 'en');
+
+function applyLanguage(lang) {
+    currentLang = lang;
+    localStorage.setItem('vl_lang', lang);
+    document.documentElement.lang = lang;
+    const t = I18N_DICT[lang] || I18N_DICT.en;
+
+    const langToggleBtn = document.getElementById('lang_toggle');
+    if (langToggleBtn) langToggleBtn.title = t.lang_title;
+    if (themeToggleBtn) themeToggleBtn.title = t.theme_title;
+
+    const appTitleText = document.getElementById('app_title_text');
+    if (appTitleText) appTitleText.textContent = t.app_title;
+
+    if (modelLabel && currentModel) {
+        modelLabel.textContent = `${t.model_prefix}${currentModel}`;
+    }
+
+    if (messageInput) messageInput.placeholder = t.message_placeholder;
+    if (sendBtn) sendBtn.textContent = t.send_btn;
+    if (editLastBtn) editLastBtn.textContent = t.edit_last_btn;
+    if (regenerateBtn) regenerateBtn.textContent = t.regenerate_btn;
+
+    const uploadImageLabel = document.getElementById('upload_image_label');
+    if (uploadImageLabel) uploadImageLabel.textContent = t.upload_label;
+    if (clearImageBtn) clearImageBtn.textContent = t.remove_image_btn;
+
+    const modelSelectLabel = document.getElementById('model_select_label');
+    if (modelSelectLabel) modelSelectLabel.textContent = t.model_select_label;
+
+    const retainedPromptHeader = document.getElementById('retained_prompt_header');
+    if (retainedPromptHeader) retainedPromptHeader.textContent = t.retained_prompt_header;
+    if (retainedPromptText) retainedPromptText.placeholder = t.retained_prompt_placeholder;
+    if (resendRetainedBtn) resendRetainedBtn.textContent = t.resend_btn;
+    if (fillRetainedBtn) fillRetainedBtn.textContent = t.fill_input_btn;
+    if (clearRetainedBtn) clearRetainedBtn.textContent = t.clear_btn;
+
+    const userProfileHeader = document.getElementById('user_profile_header');
+    if (userProfileHeader) userProfileHeader.textContent = t.user_profile_header;
+    if (saveUserBtn) saveUserBtn.textContent = t.save_profile_btn;
+
+    const memoryManagementHeader = document.getElementById('memory_management_header');
+    if (memoryManagementHeader) memoryManagementHeader.textContent = t.memory_management_header;
+    if (manualCompressBtn) manualCompressBtn.textContent = t.manual_compress_btn;
+    const memoryWarningText = document.getElementById('memory_warning_text');
+    if (memoryWarningText) memoryWarningText.textContent = t.memory_warning;
+    if (advancedCompressConfirm) advancedCompressConfirm.placeholder = t.consolidate_confirm_placeholder;
+    if (advancedCompressBtn) advancedCompressBtn.textContent = t.consolidate_btn;
+
+    const dangerZoneHeader = document.getElementById('danger_zone_header');
+    if (dangerZoneHeader) dangerZoneHeader.textContent = t.danger_zone_header;
+    const dangerWarningText = document.getElementById('danger_warning_text');
+    if (dangerWarningText) dangerWarningText.innerHTML = `<strong>${lang === 'zh' ? '警告：' : 'WARNING:'}</strong> ${t.danger_warning}`;
+    if (confirmClear) confirmClear.placeholder = t.clear_history_confirm_placeholder;
+    if (clearBtn) clearBtn.textContent = t.clear_history_btn;
+
+    const logoutLink = document.getElementById('logout_link');
+    if (logoutLink) logoutLink.textContent = t.logout_link;
+}
+
+const langToggleBtn = document.getElementById('lang_toggle');
+if (langToggleBtn) {
+    langToggleBtn.addEventListener('click', () => {
+        const next = currentLang === 'zh' ? 'en' : 'zh';
+        applyLanguage(next);
+    });
+}
 // ─────────────────────────────────────────────────────────────────────────────
 
 const chatbox = document.getElementById('chatbox');
@@ -36,6 +171,28 @@ const clearImageBtn = document.getElementById('clear_image_btn');
 
 const modelSelect = document.getElementById('model_select');
 const modelLabel = document.getElementById('model_label');
+
+// Retained Prompt elements & persistence
+const RETAINED_PROMPT_KEY = 'vl_retained_prompt';
+const retainedPromptText = document.getElementById('retained_prompt_text');
+const resendRetainedBtn = document.getElementById('resend_retained_btn');
+const fillRetainedBtn = document.getElementById('fill_retained_btn');
+const clearRetainedBtn = document.getElementById('clear_retained_btn');
+
+function saveRetainedPrompt(text) {
+    if (!text || !text.trim()) return;
+    localStorage.setItem(RETAINED_PROMPT_KEY, text);
+    if (retainedPromptText) {
+        retainedPromptText.value = text;
+    }
+}
+
+function loadRetainedPrompt() {
+    const saved = localStorage.getItem(RETAINED_PROMPT_KEY) || '';
+    if (retainedPromptText) {
+        retainedPromptText.value = saved;
+    }
+}
 
 // Accordion elements
 const userProfile = document.getElementById('user_profile');
@@ -247,17 +404,57 @@ async function sendMessage() {
     if (imageInput.files[0] && !base64Image) {
         base64Image = await getBase64Image(imageInput.files[0]);
     }
+    if (text) {
+        saveRetainedPrompt(text);
+    }
     await internalSendMessage(text, base64Image);
 }
 
 // Events
 sendBtn.addEventListener('click', sendMessage);
 messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Plain Enter inserts newline. Only Cmd+Enter (Mac) or Ctrl+Enter (Win/Linux) sends.
+    // This completely prevents accidental sends when pressing Enter to confirm English in Apple Chinese IME.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         sendMessage();
     }
 });
+
+// Retained Prompt actions
+if (retainedPromptText) {
+    retainedPromptText.addEventListener('input', () => {
+        localStorage.setItem(RETAINED_PROMPT_KEY, retainedPromptText.value);
+    });
+}
+
+if (resendRetainedBtn) {
+    resendRetainedBtn.addEventListener('click', async () => {
+        if (isStreaming) return;
+        const text = (retainedPromptText ? retainedPromptText.value : '').trim();
+        if (!text) return;
+        saveRetainedPrompt(text);
+        await internalSendMessage(text, null);
+    });
+}
+
+if (fillRetainedBtn) {
+    fillRetainedBtn.addEventListener('click', () => {
+        const text = (retainedPromptText ? retainedPromptText.value : '').trim();
+        if (!text) return;
+        messageInput.value = text;
+        messageInput.focus();
+    });
+}
+
+if (clearRetainedBtn) {
+    clearRetainedBtn.addEventListener('click', () => {
+        localStorage.removeItem(RETAINED_PROMPT_KEY);
+        if (retainedPromptText) {
+            retainedPromptText.value = '';
+        }
+    });
+}
 
 // Image preview
 imageInput.addEventListener('change', async (e) => {
@@ -405,7 +602,10 @@ async function loadModels() {
 }
 
 function updateModelLabel(modelId) {
-    if (modelLabel) modelLabel.textContent = `Model: ${modelId}`;
+    if (modelLabel) {
+        const prefix = (I18N_DICT[currentLang] || I18N_DICT.en).model_prefix;
+        modelLabel.textContent = `${prefix}${modelId}`;
+    }
 }
 
 modelSelect.addEventListener('change', async () => {
@@ -426,6 +626,8 @@ modelSelect.addEventListener('change', async () => {
 // Initial load
 async function init() {
     try {
+        loadRetainedPrompt();
+        applyLanguage(currentLang);
         const response = await fetch('/api/init');
         if (response.status === 401) {
             window.location.href = '/login';
@@ -436,7 +638,8 @@ async function init() {
         userProfile.value = data.user_md;
         renderChat();
         updateButtonStates();
-        setStatus("Ready.");
+        const t = I18N_DICT[currentLang] || I18N_DICT.en;
+        setStatus(t.status_ready);
         loadModels();
     } catch (e) {
         setStatus("Failed to load initial state.");

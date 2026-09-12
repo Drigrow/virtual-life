@@ -50,13 +50,13 @@ MODEL_REASONING = {
     "x-ai/grok-4.20": "off",
 }
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
-COMPRESS_EVERY_TURNS = 10
-KEEP_RECENT_TURNS = 2  # Keep recent dialogue turns in active context even after rolling compression
-MAX_UI_TURNS = 50  # How many recent turns /api/init returns to the browser
-COMPRESS_SIZE_THRESHOLD = 3000  # Rolling-compress pending text when it reaches ~3000 chars
-MAX_SUMMARY_CHARS = 8000  # Safety cap for a single rolling summary
-FACTS_EAGER_TURNS = 4  # Eagerly extract facts once this many pending turns accumulate
-MEMORY_SIZE_BUDGET = 8000  # Target max chars for memory.md
+COMPRESS_EVERY_TURNS = 20
+KEEP_RECENT_TURNS = 12  # Keep recent dialogue turns in active context even after rolling compression
+MAX_UI_TURNS = 60  # How many recent turns /api/init returns to the browser
+COMPRESS_SIZE_THRESHOLD = 35000  # Rolling-compress pending text when it reaches ~35000 chars (~10-12k tokens, well within 64k limit)
+MAX_SUMMARY_CHARS = 6000  # Safety cap for a single rolling summary
+FACTS_EAGER_TURNS = 6  # Eagerly extract facts once this many pending turns accumulate
+MEMORY_SIZE_BUDGET = 16000  # Target max chars for memory.md
 AUTH_MAX_ATTEMPTS = int(os.getenv("AUTH_MAX_ATTEMPTS", "5"))
 AUTH_LOCKOUT_SECONDS = int(os.getenv("AUTH_LOCKOUT_SECONDS", "300"))
 TRUSTED_SESSION_DAYS = int(os.getenv("TRUSTED_SESSION_DAYS", "30"))
@@ -614,13 +614,14 @@ def rolling_summarize(client: OpenAI, rolling_summary: str, batch: list[dict]) -
         "You maintain a rolling summary of a long-running conversation.\n"
         "Below is the existing rolling summary and a new batch of turns.\n\n"
         "Produce an UPDATED single rolling summary that:\n"
-        "- Keeps recent facts, open goals, and anything still relevant.\n"
-        "- Drops resolved, expired, and one-off items.\n"
-        "- Does NOT restate the user persona/identity (that lives separately in user.md);\n"
-        "  only record new facts about the user beyond that persona.\n"
-        "- Deduplicates; do not repeat the same information.\n\n"
-        "Separately, list NEW durable long-term facts about the user worth persisting\n"
-        "(stable preferences, health, long-term goals). Do NOT include one-off requests.\n\n"
+        "- Keeps recent facts, ongoing discussions, emotional nuances, active storylines, and pending goals.\n"
+        "- Drops fully resolved, expired, and meaningless filler dialogue.\n"
+        "- Deduplicates and maintains clear narrative continuity.\n\n"
+        "Separately, list NEW durable facts worth remembering across sessions (extract broadly):\n"
+        "1. 用户画像与偏好：个人喜好、厌恶、习惯、工作生活、人际关系、健康状态。\n"
+        "2. 共同经历与关系历程：双方建立的情感节点、共有回忆、内部笑话/特有称呼、重要剧情转折。\n"
+        "3. 约定与待办：双方作出的承诺、未完成的约定、计划中的活动、待跟进的话题。\n"
+        "4. 重要观点与情境：用户表达的深刻观点、情绪心境起伏、当前场景关键状态。\n\n"
         "Respond with ONLY a JSON object, no markdown fences, no commentary, shaped like:\n"
         '{"summary": "...", "facts": ["...", "..."]}\n\n'
         "Existing rolling summary:\n"
@@ -671,9 +672,11 @@ def extract_facts_only(client: OpenAI, turns: list[dict]) -> list[str]:
 
     prompt = (
         "These are recent conversation turns.\n"
-        "Extract any NEW durable long-term facts about the user worth remembering "
-        "across sessions (stable preferences, health, long-term goals, identity).\n"
-        "Do NOT include one-off requests, trivial events, or persona boilerplate.\n"
+        "Extract any meaningful facts, preferences, milestones, and commitments worth remembering across sessions:\n"
+        "- 用户特征：新出现的个人喜好、习惯、生活细节、工作学业、人际关系、情绪想法。\n"
+        "- 互动历程：双方共同经历的事情、产生的默契/称谓/梗、重要的情感或剧情互动。\n"
+        "- 约定与待办：AI 或用户许下的承诺、约定、未完结的话题或待跟进事项。\n"
+        "Do NOT include meaningless pleasantries, trivial greetings, or persona boilerplate.\n"
         'Respond with ONLY a JSON array of strings, e.g. ["fact1", "fact2"].\n'
         "If nothing is worth saving, respond with [].\n\n"
         + "\n\n".join(turns_text)
@@ -805,17 +808,17 @@ def merge_memory_with_model(client: OpenAI, new_facts: list[str]) -> bool:
         fact_block = "\n".join(f"- {f}" for f in new_facts if str(f).strip()) if new_facts else "(no new facts)"
 
         prompt = (
-            "You maintain `memory.md`, the assistant's LONG-TERM memory about the user.\n"
+            "You maintain `memory.md`, the assistant's comprehensive LONG-TERM memory about the user and their shared journey.\n"
             "It must contain EXACTLY two sections under the `# Memory` heading:\n"
-            '- "## 长期稳定（Durable）": stable identity, preferences, health, relationships, goals — '
+            '- "## 长期稳定（Durable）": stable user traits & preferences, major milestones in the relationship, established shared facts, core worldview, and permanent agreements — '
             "these persist long-term and are rarely removed.\n"
-            '- "## 近期临时（Temporary）": recent one-off events and temporary states — '
-            "these are pruned aggressively on every merge.\n\n"
+            '- "## 近期与进行中事项（Recent & Ongoing）": recent personal updates, ongoing storylines/topics, active commitments or promises, and temporary states — '
+            "update or prune these as they evolve or resolve.\n\n"
             "Below are the current file content and new facts.\n"
             "Produce the UPDATED COMPLETE memory.md content (pure markdown, no code block):\n"
             "- Start with the `# Memory` heading.\n"
-            "- Merge and deduplicate; near-duplicates collapse into one.\n"
-            "- Drop resolved/expired/contradictory items; prune the Temporary section hard.\n"
+            "- Merge and deduplicate; organize items into clear, high-density bullet points.\n"
+            "- Drop resolved/expired/contradictory items; prune outdated items to keep within budget.\n"
             f"- Keep the total under ~{MEMORY_SIZE_BUDGET} characters; compress aggressively if over.\n\n"
             "Current memory.md:\n"
             f"{existing}\n\n"
@@ -839,18 +842,18 @@ def merge_memory_with_model(client: OpenAI, new_facts: list[str]) -> bool:
             print("[memory] merge skipped: model output did not start with `# Memory`; original kept.", file=sys.stderr)
             return False
 
-        # Hard budget enforcement: prune the temporary section if still over budget.
+        # Hard budget enforcement: prune the temporary/recent section if still over budget.
         if len(cleaned) > MEMORY_SIZE_BUDGET:
-            marker = "## 近期临时"
+            marker = "## 近期"
             idx = cleaned.find(marker)
             if idx < 0:
                 marker = "## Temporary"
                 idx = cleaned.find(marker)
             if idx > 0:
                 cleaned = cleaned[:idx].rstrip() + "\n"
-                print("[memory] memory.md exceeded budget; pruned the temporary section.", file=sys.stderr)
+                print("[memory] memory.md exceeded budget; pruned the recent section.", file=sys.stderr)
             else:
-                print(f"[memory] memory.md still over budget ({len(cleaned)} chars) with no temporary section to prune.", file=sys.stderr)
+                print(f"[memory] memory.md still over budget ({len(cleaned)} chars) with no recent section to prune.", file=sys.stderr)
 
         # Backup the previous content, then overwrite.
         backup_path = MEMORY_MD_PATH.with_suffix(".md.bak")
@@ -870,6 +873,7 @@ def build_context_messages(user_message: dict) -> list[dict]:
     system_sections = [
         "You are an immersive, attentive, and consistent AI companion for role-play and long-term conversation.",
         "Strictly adhere to the user's profile, tone, persona, and established relationship history. Always stay in character and maintain seamless conversational continuity without breaking immersion or giving generic default responses.",
+        "Actively incorporate shared memories, past interactions, commitments, and subtle callbacks from conversation history to maintain deep continuity.",
     ]
 
     if user_text:

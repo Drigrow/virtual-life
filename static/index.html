@@ -22,8 +22,11 @@
   <button id="theme_toggle" title="Toggle dark / light mode" aria-label="Toggle theme">
     <span id="theme_icon">🌙</span>
   </button>
+  <button id="lang_toggle" title="Switch English / 中文" aria-label="Toggle language">
+    <span id="lang_icon">🌐</span>
+  </button>
   <div class="container">
-    <div id="title_md" class="title"># Virtual Life Chat<br><small id="model_label">Model: google/gemini-3.1-flash-lite-preview</small></div>
+    <div id="title_md" class="title"><span id="app_title_text"># Virtual Life Chat</span><br><small id="model_label">Model: google/gemini-3.1-flash-lite-preview</small></div>
 
     <div class="desktop_shell">
       <!-- Left Panel -->
@@ -34,7 +37,7 @@
 
         <div class="input_row">
           <textarea id="message_input" rows="1"
-            placeholder="Type your message and press Enter (Shift+Enter for newline)"></textarea>
+            placeholder="Type your message... (Click Send or Cmd/Ctrl+Enter to send)"></textarea>
           <button id="send_btn" class="primary-btn">Send</button>
         </div>
         <div class="quick_actions" style="display:flex; gap:10px; margin-top:8px;">
@@ -51,7 +54,7 @@
       <!-- Right Panel -->
       <div class="right_panel">
         <div class="image_upload">
-          <label>Upload Image (optional)</label>
+          <label id="upload_image_label">Upload Image (optional)</label>
           <input type="file" id="image_input" accept="image/*" />
           <div id="image_preview"></div>
           <button id="clear_image_btn"
@@ -59,12 +62,26 @@
         </div>
 
         <div class="image_upload">
-          <label for="model_select">Model</label>
+          <label for="model_select" id="model_select_label">Model</label>
           <select id="model_select"></select>
         </div>
 
         <div class="accordion">
-          <button class="accordion-header">User Profile & Context</button>
+          <button class="accordion-header active" id="retained_prompt_header">Retained Prompt</button>
+          <div class="accordion-content show" id="retained_prompt_content">
+            <textarea id="retained_prompt_text" rows="3" placeholder="Last sent prompt will be kept here..."></textarea>
+            <div style="display:flex; gap:8px; margin-top:8px;">
+              <button id="resend_retained_btn" class="primary-btn" style="flex:1; padding:8px; font-size:13px;">Resend</button>
+              <button id="fill_retained_btn" class="secondary-btn" style="flex:1; padding:8px; font-size:13px;">Fill Input</button>
+            </div>
+            <div style="display:flex; justify-content:flex-end; margin-top:6px;">
+              <button id="clear_retained_btn" style="background:transparent; border:none; color:var(--fg-muted); font-size:12px; cursor:pointer;">Clear</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="accordion">
+          <button class="accordion-header" id="user_profile_header">User Profile & Context</button>
           <div class="accordion-content">
             <textarea id="user_profile" rows="8"></textarea>
             <button id="save_user_btn" class="secondary-btn">Save Profile</button>
@@ -72,10 +89,10 @@
         </div>
 
         <div class="accordion">
-          <button class="accordion-header">Memory Management</button>
+          <button class="accordion-header" id="memory_management_header">Memory Management</button>
           <div class="accordion-content">
             <button id="manual_compress_btn" class="secondary-btn">Manual Compress</button>
-            <p class="warning-text" style="font-size:12px; margin-top:10px;">Warning: Consolidating memory.md
+            <p class="warning-text" id="memory_warning_text" style="font-size:12px; margin-top:10px;">Warning: Consolidating memory.md
               irreversibly rewrites the memory file.</p>
             <input type="text" id="advanced_compress_confirm" placeholder="Type COMPRESS" />
             <button id="advanced_compress_btn" class="danger-btn">Consolidate Memory</button>
@@ -83,9 +100,9 @@
         </div>
 
         <div class="accordion">
-          <button class="accordion-header">Danger Zone</button>
+          <button class="accordion-header" id="danger_zone_header">Danger Zone</button>
           <div class="accordion-content">
-            <p class="warning-text" style="font-size:12px; margin-top:0;"><strong>WARNING:</strong> This action
+            <p class="warning-text" id="danger_warning_text" style="font-size:12px; margin-top:0;"><strong>WARNING:</strong> This action
               permanently deletes ALL history, memory, and uploaded images.</p>
             <input type="text" id="confirm_clear" placeholder="Type CLEAR ALL HISTORY" />
             <button id="clear_btn" class="danger-btn">Clear All History</button>
@@ -93,7 +110,7 @@
         </div>
 
         <div style="margin-top:10px;text-align:center;">
-          <a href="/logout" style="color:#64748b;font-size:12px;text-decoration:none;">Logout</a>
+          <a href="/logout" id="logout_link" style="color:#64748b;font-size:12px;text-decoration:none;">Logout</a>
         </div>
       </div>
     </div>
