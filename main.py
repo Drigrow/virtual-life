@@ -1123,7 +1123,12 @@ def build_server() -> FastAPI:
                     from fastapi.responses import JSONResponse
                     return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
                 return RedirectResponse(url="/login", status_code=302)
-        return await call_next(request)
+        response = await call_next(request)
+        if request.url.path.startswith("/static/") or request.url.path in ("/app", "/app/", "/"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
     @server.get("/login", response_class=HTMLResponse)
     async def login_page():

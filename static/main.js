@@ -31,7 +31,7 @@ const I18N_DICT = {
         lang_title: "Switch English / 中文",
         app_title: "# Virtual Life Chat",
         model_prefix: "Model: ",
-        message_placeholder: "Type your message... (Click Send or Cmd/Ctrl+Enter to send)",
+        message_placeholder: "Type your message... (Click Send to send)",
         send_btn: "Send",
         edit_last_btn: "📝 Edit Last",
         regenerate_btn: "🔄 Regenerate",
@@ -62,7 +62,7 @@ const I18N_DICT = {
         lang_title: "切换语言 (English / 中文)",
         app_title: "# 虚拟人生 Virtual Life",
         model_prefix: "模型: ",
-        message_placeholder: "输入消息...（点击发送或 Cmd/Ctrl+Enter 发送）",
+        message_placeholder: "输入消息...（点击发送按钮发送）",
         send_btn: "发送",
         edit_last_btn: "📝 编辑上一条",
         regenerate_btn: "🔄 重新生成",
@@ -181,14 +181,28 @@ const clearRetainedBtn = document.getElementById('clear_retained_btn');
 
 function saveRetainedPrompt(text) {
     if (!text || !text.trim()) return;
-    localStorage.setItem(RETAINED_PROMPT_KEY, text);
+    const cleanText = text.trim();
+    localStorage.setItem(RETAINED_PROMPT_KEY, cleanText);
     if (retainedPromptText) {
-        retainedPromptText.value = text;
+        retainedPromptText.value = cleanText;
     }
 }
 
-function loadRetainedPrompt() {
-    const saved = localStorage.getItem(RETAINED_PROMPT_KEY) || '';
+function loadRetainedPrompt(history) {
+    let saved = (localStorage.getItem(RETAINED_PROMPT_KEY) || '').trim();
+    if (!saved && history && Array.isArray(history) && history.length > 0) {
+        for (let i = history.length - 1; i >= 0; i--) {
+            if (history[i].role === 'user') {
+                const parts = history[i].content.split('\n\n![uploaded image](');
+                const userText = (parts[0] || '').trim();
+                if (userText) {
+                    saved = userText;
+                    localStorage.setItem(RETAINED_PROMPT_KEY, saved);
+                    break;
+                }
+            }
+        }
+    }
     if (retainedPromptText) {
         retainedPromptText.value = saved;
     }
@@ -297,6 +311,10 @@ async function internalSendMessage(text, base64Image) {
     if (isStreaming) return;
     if (!text && !base64Image) return;
 
+    if (text) {
+        saveRetainedPrompt(text);
+    }
+
     setStatus("Sending...");
     isStreaming = true;
     updateButtonStates();
@@ -404,22 +422,13 @@ async function sendMessage() {
     if (imageInput.files[0] && !base64Image) {
         base64Image = await getBase64Image(imageInput.files[0]);
     }
-    if (text) {
-        saveRetainedPrompt(text);
-    }
     await internalSendMessage(text, base64Image);
 }
 
 // Events
 sendBtn.addEventListener('click', sendMessage);
-messageInput.addEventListener('keydown', (e) => {
-    // Plain Enter inserts newline. Only Cmd+Enter (Mac) or Ctrl+Enter (Win/Linux) sends.
-    // This completely prevents accidental sends when pressing Enter to confirm English in Apple Chinese IME.
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        sendMessage();
-    }
-});
+// Note: Bare Enter key listener is completely removed. Pressing Enter will only insert a newline.
+// Messages can only be sent by explicitly clicking the Send button (or Resend in Retained Prompt).
 
 // Retained Prompt actions
 if (retainedPromptText) {
@@ -636,6 +645,7 @@ async function init() {
         const data = await response.json();
         chatHistory = data.chat_ui_state;
         userProfile.value = data.user_md;
+        loadRetainedPrompt(chatHistory);
         renderChat();
         updateButtonStates();
         const t = I18N_DICT[currentLang] || I18N_DICT.en;
